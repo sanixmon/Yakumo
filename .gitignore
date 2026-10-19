@@ -85,3 +85,4 @@ __pycache__/
 # Private device-testing configuration and release plans
 /device-testing.local.json
 /device-release.local.json
+/profiles/p3p/generated/

@@ -995,6 +995,43 @@ void report_interpreter_stats(std::size_t limit) {
     }
 }
 
+
+#include <inttypes.h>
+
+static FILE *g_yakumo_oracle_fp = nullptr;
+static uint64_t g_yakumo_oracle_seq = 0;
+static bool g_yakumo_oracle_init = false;
+
+static inline void log_yakumo_trace(uint32_t pc, const AllegrexContext &ctx, uint32_t raw_word) {
+    if (!g_yakumo_oracle_init) {
+        g_yakumo_oracle_init = true;
+        const char *tpath = getenv("YAKUMO_ORACLE_TRACE");
+        if (tpath && *tpath) {
+            g_yakumo_oracle_fp = fopen(tpath, "w");
+        }
+    }
+    if (!g_yakumo_oracle_fp) return;
+
+    const char *mode = getenv("YAKUMO_ORACLE_MODE");
+    bool trace_all = (mode && strcmp(mode, "instruction") == 0);
+
+    uint32_t opcode = raw_word >> 26;
+    uint32_t funct = raw_word & 0x3f;
+    bool is_call = (opcode == 3) || (opcode == 0 && funct == 9);
+
+    if (trace_all || is_call) {
+        g_yakumo_oracle_seq++;
+        fprintf(g_yakumo_oracle_fp,
+            "{\"sequence\":%" PRIu64 ",\"pc_guest\":\"0x%08x\",\"sp\":\"0x%08x\","
+            "\"a0\":\"0x%08x\",\"a1\":\"0x%08x\",\"a2\":\"0x%08x\",\"a3\":\"0x%08x\","
+            "\"v0\":\"0x%08x\",\"v1\":\"0x%08x\",\"event\":\"%s\"}\n",
+            g_yakumo_oracle_seq, pc, ctx.gpr[29],
+            ctx.gpr[4], ctx.gpr[5], ctx.gpr[6], ctx.gpr[7],
+            ctx.gpr[2], ctx.gpr[3], is_call ? "call" : "instruction");
+        if (g_yakumo_oracle_seq % 100 == 0) fflush(g_yakumo_oracle_fp);
+    }
+}
+
 InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx, std::uint64_t instruction_budget) {
     load_settings();
     const std::uint64_t budget = instruction_budget != 0u ? instruction_budget : g_budget;
@@ -1034,6 +1071,7 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx, std::uint6
 
         ctx.pc = pc;
         const DecodedInstruction decoded = decode_allegrex(memory.aot_load32(pc));
+        log_yakumo_trace(pc, ctx, decoded.word);
         ++executed;
 
         if (!decoded.has_delay_slot()) {

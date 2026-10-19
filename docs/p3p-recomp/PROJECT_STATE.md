@@ -1,0 +1,126 @@
+# PROJECT_STATE.md — Persona 3 Portable (P3P) Static Recompilation
+
+> **Mandatory Entry Point**: Any AI agent or developer continuing this project MUST read this file first before inspecting or modifying any project files.
+
+---
+
+## 1. Project Objective & Explicit Non-Goals
+
+### Objective
+Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Portable** (PSP, `ULES-01523` / `ULUS-10512`) using the **TeamGDB/Yakumo** fork of `PSPRecomp`. Target runtime platforms: Linux/Steam Deck and Android (`arm64-v8a`), utilizing an offline MIPS Allegrex AOT recompiler, a clean HLE kernel, and native Vulkan rendering.
+
+### Explicit Non-Goals
+- **No Emulation Core Replacement**: Not building an interpreter/JIT-centric emulator.
+- **No Scope Creep Before Baseline**: No renderer enhancements, texture packs, mod loaders, or audio synthesis before achieving clean, bit-level verified thread bootstrap.
+- **No Copyrighted Asset Distribution**: Zero proprietary game files (ISOs, decrypted EBOOTs, textures, sounds) committed to Git. User must provide legally dumped media (*Bring Your Own Game*).
+- **No Core Framework Pollution**: Zero game-specific hardcodes, memory addresses, or hooks in `src/` or `include/psprecomp/`. All game logic belongs strictly in `profiles/p3p/`.
+
+---
+
+## 2. Current Verified Repository State
+
+- **Repository Root**: `/tmp/recomp_workspace/yakumo_repo`
+- **Active Git Branch**: `main`
+- **Upstream HEAD Commit**: `5bacba315b5b151856adc80cd22b57ef6cf04308` (Merge pull request #341 from TeamGDB/sound-settings)
+- **Local Working-Tree Status**:
+  - `modified: .gitignore` (added `/profiles/p3p/generated/`)
+  - `modified: src/interpreter.cpp` (Oracle trace hook added in Gate 3, non-intrusive, gated by `YAKUMO_ORACLE_TRACE`)
+  - `untracked: profiles/p3p/` (scaffolded profile: `host/`, `config/`, `scripts/`, `tools/`, `packaging/`)
+  - `untracked: tools/trace/trace_diff.py` (validated streaming JSONL diff tool)
+  - `untracked: docs/p3p-recomp/` (project truth system)
+
+---
+
+## 3. Current Gate & Milestone Status
+
+- **Latest Completed Gate**: **Gate 4A-R3 (Final Contract & Memory Verification)** — `VERDICT: PASS`
+- **Current Gate Status**: **Gate 4B (HLE Threading Implementation) — READY FOR AUTHORIZATION**
+- **Blockers to Gate 4B Entry**: **NONE (0 Remaining Blockers)**. All mathematical bounds, stack formulas, `$ra` contracts, failure atomicity matrices, and memory allocators have been verified against source code and traces.
+- **Authorized Scope for Next Step (Gate 4B)**:
+  1. Implement `p3p_kernel.hpp` & `.cpp` in `profiles/p3p/host/kernel/` (RangeAllocator + Thread Context Lifecycle).
+  2. Implement `p3p_hle_threadman.cpp` in `profiles/p3p/host/hle/` (`sceKernelCreateThread` & `sceKernelStartThread` stubs).
+  3. Execute unit tests and trace oracle verification from `0x0880421C` to `0x08804260`.
+- **Explicitly Prohibited in Next Step**:
+  - NO changes to `src/` or `include/psprecomp/`.
+  - NO game boot loop, audio synthesis, or renderer work.
+  - NO implementing full `ThreadMan` (semaphores, event flags, mutexes deferred).
+
+---
+
+## 4. Key Verified Facts vs Unverified Claims
+
+| Parameter | Value | Status | Evidence Source |
+|---|---|---|---|
+| Decrypted ELF SHA-256 | `221b569fd8f01c8194bed47abcd69014251f518fa5b51ab3577f1d3f96522b26` | **VERIFIED** | `sha256sum /tmp/p3p_sys/EBOOT_DECRYPTED.ELF` |
+| Encrypted EBOOT SHA-256 | `f2d4e66a3a373bde066921221e01bd217aa856ee78468a0185e237b66ddc0023` | **VERIFIED** | `sha256sum /tmp/p3p_sys/EBOOT.BIN` |
+| Module Entry (`module_start`) | `0x08804108` | **VERIFIED** | ELF Header `e_entry` + `p3p_report.json` |
+| Thread Entry (`user_main`) | `0x0880421C` | **VERIFIED** | Arg `$a1` in Call #3 + PPSSPP Seq #68 |
+| First Game Init JAL | `0x08804260` | **VERIFIED** | Disassembly + PPSSPP Seq #82 |
+| Observed P3P Boot Arglen | `27` (`0x1B`) bytes | **VERIFIED** | PPSSPP trace Seq #68 register `$a0` |
+| P3P Module GP | `0x08C42A50` | **VERIFIED** | `p3p_report.json` ModuleInfo `gp` field |
+| User RAM Allocation Start | `0x08EC1000` | **VERIFIED** | `align_up(load_image_end 0x08EC0F7C, 0x1000)` |
+| Return Stub Contract ($ra) | `0x08800000` (`kThreadExitStub`) | **DESIGN DECISION** | Intentional AOT divergence from stack syscall |
+| 85 Missing HLE NIDs | 61.5% implemented in Yakumo base | **UNVERIFIED AT RUNTIME** | Static name match; runtime behavior untested |
+
+---
+
+## 5. Files & Artifacts Checklist
+
+Before resuming or modifying any code, verify existence of:
+- [x] Decrypted ELF: `/tmp/p3p_sys/EBOOT_DECRYPTED.ELF`
+- [x] Reference Emulator: `/tmp/ppsspp_repo/build/PPSSPPHeadless`
+- [x] Recomp Runner: `/tmp/recomp_workspace/yakumo_repo/out/p3p/profiles/p3p/p3p_trace_runner`
+- [x] Oracle Diff Tool: `/tmp/recomp_workspace/yakumo_repo/tools/trace/trace_diff.py`
+- [x] Reference Trace: `/tmp/ppsspp_p3p_trace.jsonl` and `/tmp/ppsspp_p3p_calls.jsonl`
+- [x] Analysis Data: `/tmp/p3p_analysis/p3p_report.json`
+
+---
+
+## 6. Exact Resume Instructions for Next AI Session
+
+To continue the project in a new session, run:
+```bash
+# 1. Enter repository
+cd /tmp/recomp_workspace/yakumo_repo
+
+# 2. Check git cleanliness
+git status
+
+# 3. Read project truth
+cat docs/p3p-recomp/PROJECT_STATE.md
+
+# 4. Review active gate specifications
+cat docs/p3p-recomp/GATES.md
+cat docs/p3p-recomp/reports/gate-4a-final-audit.md
+
+# 5. Execute only authorized tasks for Gate 4B
+```
+
+---
+
+## 7. Reusable Workflow Skill Assessment
+
+A dedicated skill (e.g., `skill://psp-static-recomp-workflow`) is **RECOMMENDED FOR FUTURE SESSIONS** once Gate 4B passes and HLE development becomes iterative.
+- **Value**: Automates pre-flight git checks, prevents accidental edits to `src/`, enforces JSONL trace diff verification on every build, and blocks premature gate progression.
+- **Current Posture**: Keep repository markdown files (`docs/p3p-recomp/*`) as the primary ground truth. Do not generate or install a skill until the Gate 4B implementation baseline is reproducible.
+
+---
+
+## 8. Session-Handoff Protocol
+
+### Mandatory Start-of-Session Procedure
+1. **Read `PROJECT_STATE.md`**: Establish current context, scope, and rules.
+2. **Inspect Git status and HEAD**: Run `git status` and `git log -1`.
+3. **Read the active gate and ADRs**: Inspect `docs/p3p-recomp/GATES.md` and `docs/p3p-recomp/DECISIONS.md`.
+4. **Verify artifacts exist**: Confirm required ELFs, tools, and traces from Section 5.
+5. **Identify the single authorized task**: Do not expand scope.
+6. **State blockers before editing**: If any prerequisite is missing, halt and report.
+
+### Mandatory End-of-Session Procedure
+1. **Summarize completed work**: State exactly what was analyzed or built.
+2. **List changed paths**: Run `git status -s` and list all touched files.
+3. **Record tests executed and raw results**: Include command and output.
+4. **Record untested behavior**: Note what remains unverified.
+5. **Update project state**: Reflect status changes in `PROJECT_STATE.md`, `GATES.md`, and `EVIDENCE.md`.
+6. **Document next authorized task**: State clearly what the next session should do.
+7. **Leave clean working tree**: Ensure no orphaned or intermediate artifacts linger uncommitted or untracked.

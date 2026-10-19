@@ -102,3 +102,19 @@ Reuse compatible prebuilt overlays for development and release packaging. Rebuil
 - Open a draft pull request early and push after every commit that builds. Work that exists only locally is lost when a session ends.
 - The description says what changed and why, how it was verified (platform, commit, what you looked at), what was not verified, and which issues it closes or references.
 - Update the docs that the change makes wrong: the profile README for settings and variables, `docs/BUILDING.md` for the build, and `docs/COMPATIBILITY.md` for verified results.
+
+## Persona 3 Portable (P3P) Recompilation Project Rules
+
+These operating rules apply to any coding agent working on `profiles/p3p/`:
+
+1. **Read `docs/p3p-recomp/PROJECT_STATE.md` first**: This document is the mandatory entry point. Read it before inspecting or modifying any project files.
+2. **Inspect Git status before work**: Run `git status` and verify HEAD commit. Preserve existing uncommitted user changes.
+3. **Verify relevant source contracts**: Do not rely on report text or chat memory alone; verify contracts and structures directly from source code and actual test commands.
+4. **Respect gate boundaries**: Only execute work explicitly authorized within the active gate defined in `docs/p3p-recomp/GATES.md` and `docs/p3p-recomp/ROADMAP.md`.
+5. **Maintain strict profile isolation**: Avoid changes to `src/`, `include/psprecomp/`, or `profiles/mhp3rd/` unless separately authorized. All P3P logic belongs strictly under `profiles/p3p/`.
+6. **No premature subsystems**: Avoid game boot loops, Vulkan renderer changes, and audio synthesis work unless explicitly authorized by later gates.
+7. **Implementation gate approval**: Never implement HLE or kernel code before explicit user approval for that implementation gate.
+8. **Never fabricate**: Never fabricate test results, benchmark numbers, source line numbers, hashes, or build statuses. If a check fails, report the raw failure output.
+9. **Explicit change reporting**: Report exact changed paths, executed commands, test results, limitations, and concrete next steps.
+10. **Keep documentation synchronized**: Update `docs/p3p-recomp/PROJECT_STATE.md`, `GATES.md`, and `EVIDENCE.md` whenever gate status or test artifacts change.
+11. **Stop on unverified prerequisites**: If a required file, hash, or toolchain is missing or cannot be verified, stop immediately and report the blocker.
