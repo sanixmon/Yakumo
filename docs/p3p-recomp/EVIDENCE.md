@@ -8,19 +8,19 @@ This document compiles all independently verifiable evidence, binary hashes, tra
 
 | Component | Path / Location | Commit / Checksum | Verification Method |
 |---|---|---|---|
-| **Yakumo Repo** | `/tmp/recomp_workspace/yakumo_repo` | `5bacba315b5b151856adc80cd22b57ef6cf04308` | `git log -1` |
-| **PPSSPP Reference**| `/tmp/ppsspp_repo` | `a5275067b62433375bbde12921e96329a795dff0` | `git log -1` |
-| **pspdecrypt** | `/tmp/pspdecrypt` | `c156627db7634d395c380c0a9589130f603307fc` | `git log -1` |
-| **P3P EBOOT.BIN** | `/tmp/p3p_sys/EBOOT.BIN` | SHA-256: `f2d4e66a3a373bde066921221e01bd217aa856ee78468a0185e237b66ddc0023` | `sha256sum` |
-| **P3P Decrypted ELF**| `/tmp/p3p_sys/EBOOT_DECRYPTED.ELF`| SHA-256: `221b569fd8f01c8194bed47abcd69014251f518fa5b51ab3577f1d3f96522b26` | `sha256sum` |
-| **P3P PARAM.SFO** | `/tmp/p3p_sys/PARAM.SFO` | SHA-256: `ee963a3aa833a85b12628cb8d160cd7a0362beb352bdb26e1468582c32edc388` | `sha256sum` |
+| **Yakumo Repo** | `/home/ubuntu/recompile/yakumo_repo` | `5bacba315b5b151856adc80cd22b57ef6cf04308` | `git log -1` |
+| **PPSSPP Reference**| `/home/ubuntu/recompile/ppsspp_repo` | `a5275067b62433375bbde12921e96329a795dff0` | `git log -1` |
+| **pspdecrypt** | `/home/ubuntu/recompile/pspdecrypt` | `c156627db7634d395c380c0a9589130f603307fc` | `git log -1` |
+| **P3P EBOOT.BIN** | `/home/ubuntu/recompile/p3p_sys/EBOOT.BIN` | SHA-256: `f2d4e66a3a373bde066921221e01bd217aa856ee78468a0185e237b66ddc0023` | `sha256sum` |
+| **P3P Decrypted ELF**| `/home/ubuntu/recompile/p3p_sys/EBOOT_DECRYPTED.ELF`| SHA-256: `221b569fd8f01c8194bed47abcd69014251f518fa5b51ab3577f1d3f96522b26` | `sha256sum` |
+| **P3P PARAM.SFO** | `/home/ubuntu/recompile/p3p_sys/PARAM.SFO` | SHA-256: `ee963a3aa833a85b12628cb8d160cd7a0362beb352bdb26e1468582c32edc388` | `sha256sum` |
 
 ---
 
 ## 2. Static Analysis Evidence (`psp_analyze`)
 
-- **Report Path**: `/tmp/p3p_analysis/p3p_report.json`
-- **Command**: `/tmp/recomp_workspace/yakumo_repo/out/framework/psp_analyze /tmp/p3p_sys/EBOOT_DECRYPTED.ELF /tmp/p3p_analysis/p3p_report.json`
+- **Report Path**: `/home/ubuntu/recompile/p3p_analysis/p3p_report.json`
+- **Command**: `/home/ubuntu/recompile/yakumo_repo/out/framework/psp_analyze /home/ubuntu/recompile/p3p_sys/EBOOT_DECRYPTED.ELF /home/ubuntu/recompile/p3p_analysis/p3p_report.json`
 - **Key Metrics**:
   - `load_base`: `0x08804000`
   - `entry_runtime`: `0x08804108`
@@ -39,7 +39,7 @@ This document compiles all independently verifiable evidence, binary hashes, tra
 
 ## 3. Disassembly Checkpoints (`0x08804108`..`0x08804264`)
 
-Dumped via `/tmp/recomp_workspace/yakumo_repo/out/framework/dump_function`:
+Dumped via `/home/ubuntu/recompile/yakumo_repo/out/framework/dump_function`:
 ```text
 0x08804108  27BDFFE0  addiu $sp, $sp, -32        # module_start: alokasi stack 32 byte
 0x0880410C  3C020602  lui   $v0, 0x0602          # $v0 = 0x06020000 (SDK 6.20)
@@ -86,8 +86,8 @@ Dumped via `/tmp/recomp_workspace/yakumo_repo/out/framework/dump_function`:
 
 ## 4. Emulator Oracle Trace Evidence (`PPSSPPHeadless`)
 
-- **Trace File**: `/tmp/ppsspp_p3p_trace.jsonl` (Instruction-level, 1,395,523 lines)
-- **Call Trace File**: `/tmp/ppsspp_p3p_calls.jsonl` (Call-level, 457,259 lines)
+- **Trace File**: `/home/ubuntu/recompile/traces/ppsspp_p3p_trace.jsonl` (Instruction-level, 1,395,523 lines)
+- **Call Trace File**: `/home/ubuntu/recompile/traces/ppsspp_p3p_calls.jsonl` (Call-level, 457,259 lines)
 - **Sequence #68 (First instruction of `user_main` at `0x0880421C`):**
 ```json
 {
@@ -123,7 +123,7 @@ Dumped via `/tmp/recomp_workspace/yakumo_repo/out/framework/dump_function`:
 
 ## 5. Trace Diff Tool Validation (`trace_diff.py`)
 
-- **Tool Path**: `/tmp/recomp_workspace/yakumo_repo/tools/trace/trace_diff.py`
+- **Tool Path**: `/home/ubuntu/recompile/yakumo_repo/tools/trace/trace_diff.py`
 - **Validation Results**:
   1. Identical Logs: Exit code `0` (`PASS`)
   2. Register Mismatch Only: Exit code `1` (`STATE_MISMATCH`, isolates `$a0`)

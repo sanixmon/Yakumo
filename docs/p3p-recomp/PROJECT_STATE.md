@@ -19,7 +19,7 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 
 ## 2. Current Verified Repository State
 
-- **Repository Root**: `/tmp/recomp_workspace/yakumo_repo`
+- **Repository Root**: `/home/ubuntu/recompile/yakumo_repo`
 - **Active Git Branch**: `main`
 - **Upstream HEAD Commit**: `5bacba315b5b151856adc80cd22b57ef6cf04308` (Merge pull request #341 from TeamGDB/sound-settings)
 - **Local Working-Tree Status**:
@@ -51,8 +51,8 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 
 | Parameter | Value | Status | Evidence Source |
 |---|---|---|---|
-| Decrypted ELF SHA-256 | `221b569fd8f01c8194bed47abcd69014251f518fa5b51ab3577f1d3f96522b26` | **VERIFIED** | `sha256sum /tmp/p3p_sys/EBOOT_DECRYPTED.ELF` |
-| Encrypted EBOOT SHA-256 | `f2d4e66a3a373bde066921221e01bd217aa856ee78468a0185e237b66ddc0023` | **VERIFIED** | `sha256sum /tmp/p3p_sys/EBOOT.BIN` |
+| Decrypted ELF SHA-256 | `221b569fd8f01c8194bed47abcd69014251f518fa5b51ab3577f1d3f96522b26` | **VERIFIED** | `sha256sum /home/ubuntu/recompile/p3p_sys/EBOOT_DECRYPTED.ELF` |
+| Encrypted EBOOT SHA-256 | `f2d4e66a3a373bde066921221e01bd217aa856ee78468a0185e237b66ddc0023` | **VERIFIED** | `sha256sum /home/ubuntu/recompile/p3p_sys/EBOOT.BIN` |
 | Module Entry (`module_start`) | `0x08804108` | **VERIFIED** | ELF Header `e_entry` + `p3p_report.json` |
 | Thread Entry (`user_main`) | `0x0880421C` | **VERIFIED** | Arg `$a1` in Call #3 + PPSSPP Seq #68 |
 | First Game Init JAL | `0x08804260` | **VERIFIED** | Disassembly + PPSSPP Seq #82 |
@@ -67,12 +67,12 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 ## 5. Files & Artifacts Checklist
 
 Before resuming or modifying any code, verify existence of:
-- [x] Decrypted ELF: `/tmp/p3p_sys/EBOOT_DECRYPTED.ELF`
-- [x] Reference Emulator: `/tmp/ppsspp_repo/build/PPSSPPHeadless`
-- [x] Recomp Runner: `/tmp/recomp_workspace/yakumo_repo/out/p3p/profiles/p3p/p3p_trace_runner`
-- [x] Oracle Diff Tool: `/tmp/recomp_workspace/yakumo_repo/tools/trace/trace_diff.py`
-- [x] Reference Trace: `/tmp/ppsspp_p3p_trace.jsonl` and `/tmp/ppsspp_p3p_calls.jsonl`
-- [x] Analysis Data: `/tmp/p3p_analysis/p3p_report.json`
+- [x] Decrypted ELF: `/home/ubuntu/recompile/p3p_sys/EBOOT_DECRYPTED.ELF`
+- [x] Reference Emulator: `/home/ubuntu/recompile/ppsspp_repo/build/PPSSPPHeadless`
+- [x] Recomp Runner: `/home/ubuntu/recompile/yakumo_repo/out/p3p/profiles/p3p/p3p_trace_runner`
+- [x] Oracle Diff Tool: `/home/ubuntu/recompile/yakumo_repo/tools/trace/trace_diff.py`
+- [x] Reference Trace: `/home/ubuntu/recompile/traces/ppsspp_p3p_trace.jsonl` and `/home/ubuntu/recompile/traces/ppsspp_p3p_calls.jsonl`
+- [x] Analysis Data: `/home/ubuntu/recompile/p3p_analysis/p3p_report.json`
 
 ---
 
@@ -81,7 +81,7 @@ Before resuming or modifying any code, verify existence of:
 To continue the project in a new session, run:
 ```bash
 # 1. Enter repository
-cd /tmp/recomp_workspace/yakumo_repo
+cd /home/ubuntu/recompile/yakumo_repo
 
 # 2. Check git cleanliness
 git status
