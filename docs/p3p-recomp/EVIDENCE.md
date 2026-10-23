@@ -841,3 +841,42 @@ user_main and displayThread both Ready-spinning at 0x08B1EE30
 soundThread in a timed wait in player code, CRI ADX Audio/File
 spinning in their wrappers. The movie is done; whatever the
 player waits for to declare playback finished never fires.
+
+
+---
+
+## Gate 6 follow-up: opening movie completes, player teardown clean (2026-10-24)
+
+Verified with a 40M-dispatch boot (`--max-dispatches 40000000`) after
+ADR-009; the instrumented investigation boots are reproducible from
+the final tree (30M confirmation boot shows the identical liveness
+signature).
+
+- **Stream accounting (unchanged ground truth):** first playback ends
+  with `getavcau` end-of-stream totals v 2997 / a 2153 -- every video
+  AU the PSMF contains (2997 picture AUs measured in the stream vs
+  2998 predicted from the header) and the audio track consumed in
+  lockstep; the end-of-stream pts rule (last AU pts + one step)
+  matches the header's last timestamp. A one-packet ringbuffer tail
+  is freed when the last AU is served (not at parse time -- the
+  parser races far ahead of playback and the game would begin
+  teardown mid-movie), so `sceMpegRingbufferAvailableSize` reaches
+  the full 960 packets the game polls for.
+- **Teardown order (the fix):** `displayThread` and `soundThread`
+  print as exited *before* `user_main`'s deletes; all three
+  `sceKernelDeleteThread` calls (sound 143, display 141, read 142)
+  return success on already-exited threads. Zero guest faults
+  (`0xCCCCCCCC` deref count 0; previously deterministic).
+- **Post-movie progress (liveness detector):** a second playback
+  follows (cumulative totals v 5797 / a 4164 at its end), then the
+  game leaves the movie path: liveness windows show GE pixel deltas
+  of +99,666,137 and +142,199,843 with `mpeg_put +0`. No window in
+  the 40M run is flagged `POLLING SUSPECT`.
+- **Tempo robustness:** the same boot with the audio drain rate
+  halved (22050) and doubled (88200) reaches end-of-stream and tears
+  down cleanly both ways (deletes succeed, zero faults) -- the join
+  via `sceKernelWaitThreadEnd` is structural, not a tuned constant.
+- **Regression:** full suite green -- GE 19, rasterizer 16, modules
+  20, io 44, services 92, yield 114 (audio allocation/drain checks
+  added), threading 144 (DeleteThread + WaitThreadEnd checks added);
+  `verify_boot.sh` PASS.

@@ -120,3 +120,53 @@ Gate 4B is unchanged: switches still happen only inside an HLE dispatch or
 the exit hand-off, and the import wrapper's pc guard (ADR-007 era) makes a
 handler-switched context safe. `verify_boot.sh` (Gate 4B oracle window) is
 unaffected and still passes.
+
+
+---
+
+### ADR-009: Audio Drain Model, Real Channel Allocation, and Thread-End Joins (Gate 6 follow-up)
+
+**Context.** The opening movie played end to end but the player then
+crashed in teardown: user_main freed the player structures while the
+display thread was still cycling them (guest dereferenced the heap
+allocator's `0xCCCCCCCC` free-fill). Three emulation gaps combined:
+
+1. **Blocking audio output consumed no stream time.** The Gate 5C
+   treatment slept only to the next frame boundary regardless of the
+   buffer length, so the player's audio thread ran ~2.8x faster than
+   its vblank-paced video thread and finished minutes of stream time
+   early. On hardware `sceAudioOutputBlocking` parks the caller until
+   its samples have played out at 44.1 kHz; that drain is the anchor
+   that keeps A/V in lockstep.
+2. **`sceAudioChReserve(-1)` returned channel 0 to every caller.**
+   The SAS renderer, the CRI wave output and the movie's wave library
+   each hold a channel and drain in parallel on hardware. Sharing one
+   queue serialized them, tripling the movie thread's per-buffer wait
+   once (1) was fixed.
+3. **`sceKernelWaitThreadEnd` and `sceKernelDeleteThread` were
+   return-0 stubs.** The game's teardown joins its worker threads
+   before freeing; the stub let `user_main` free live structures.
+
+**Decision.**
+- Model each audio channel's drain: reserve/change-length records a
+  sample count; a blocking output enqueues the buffer and sleeps the
+  caller until `now + queued_samples / 44100`. Rest-length queries
+  report the un-drained remainder. Channels (and the Output2/SRC
+  paths) keep independent drain clocks.
+- Allocate channels like the reference kernel: `-1` takes the lowest
+  unreserved channel, a specific request fails if taken, release
+  frees it.
+- Implement `sceKernelWaitThreadEnd` with the block/re-dispatch +
+  hand-off idiom (ADR-008): the target's exit records its status and
+  readies waiters, whose re-dispatched call returns that status.
+  Timeouts are honoured via the timed-wait wake. Implement
+  `sceKernelDeleteThread` with reference semantics (`NOT_DORMANT`
+  unless the thread already exited).
+
+**Consequences.** The movie's audio and video consume the stream in
+lockstep (audio AU count 2153/2156 when video exhausts, both ~100 s
+of fake clock), both worker threads exit on their own, all three
+deletes succeed on dormant threads, and the game proceeds to a
+second playback and then to active GE rendering. The result is
+structural, not tuned: re-running with the drain rate halved and
+doubled (22050 / 88200) still tears down cleanly in both directions.
