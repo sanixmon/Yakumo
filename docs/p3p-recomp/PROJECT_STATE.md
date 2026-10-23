@@ -34,6 +34,7 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 - **Current Gate Status**: **Gate 5 (Headless CPK Mount & File I/O) — READY FOR AUTHORIZATION**
 - **Gate 4B Results (2026-10-23)**: AOT executable host `p3p` boots the ELF; `p3p_kernel` (RangeAllocator + thread lifecycle) and `p3p_hle_threadman` (Create/Start) implemented per the Gate 4A specification. Unit tests 128/128 pass. Oracle window `0x0880421C`–`0x08804260` matches PPSSPP (see EVIDENCE.md Gate 4B section; `profiles/p3p/scripts/verify_boot.sh` reproduces the full loop). Boot proceeds past Call #5 deep into game init and stops at a guest null dereference caused by a return-0 stub — Gate 5+ HLE territory, not a Gate 4B defect.
 - **Authorized Scope for Next Step (Gate 5)**: Per `GATES.md` / `ROADMAP.md` (virtual disc mount, `umd0.cpk` reading, `IoFileMgrForUser`). Requires explicit user authorization.
+- **Gate 5 Plan (2026-10-23)**: `docs/p3p-recomp/GATE5_PLAN.md` (prepared at the user's request). Hard blocker: the game media is not on the VPS — the user must place his own ULES-01523 ISO dump at `~/recompile/p3p_media/` (BYOG rule); extraction via 7z into `profiles/p3p/game/` (gitignored).
 - **Explicitly Prohibited in Next Step**:
   - NO changes to `src/` or `include/psprecomp/`.
   - NO renderer or audio work before its gate.
