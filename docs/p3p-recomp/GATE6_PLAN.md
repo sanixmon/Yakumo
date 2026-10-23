@@ -70,6 +70,14 @@ end is testable headless and the back end can change:
   `--dump-frame out.png` after N frames. *Exit: a boot run produces a
   recognizable frame (ATLUS/logo or title background) in the dump;
   per-draw unit tests green.*
+- **WP2b — Interpreter fallback + rasterizer correctness (DONE
+  2026-10-23).** Unsupported-instruction hook + unit poisoning +
+  interpreter bridge so the boot passes unlowered VFPU instructions
+  (3 sites probe-skipped pending real semantics: 0x66818102,
+  0x66808003, 0xD03C8080); five rasterizer semantics fixes (CLUT high
+  bits, GE address aliasing, vertex color formats, through positions,
+  ALPHATEST/BLENDMODE layouts). Exit met: the boot renders
+  continuously with fully-written VRAM framebuffers. See EVIDENCE.md.
 - **WP3 — Vulkan presentation.** Offscreen Vulkan present of the VRAM
   framebuffer (Lavapipe), screenshot parity with WP2's dump, then the
   windowed path (SDL3) for desktop. *Exit: Vulkan-rendered frame matches
