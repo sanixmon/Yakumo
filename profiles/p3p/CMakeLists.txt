@@ -51,6 +51,7 @@ add_library(p3p_hle STATIC
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_audio.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_umd.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_services.cpp"
+    "${P3P_PROFILE_DIR}/host/gpu/p3p_ge_executor.cpp"
 )
 target_include_directories(p3p_hle PUBLIC
     "${P3P_PROFILE_DIR}/host"
@@ -114,4 +115,14 @@ if(PSPRECOMP_BUILD_PROFILE_TESTS)
     )
     target_link_libraries(test_p3p_yield PRIVATE p3p_kernel p3p_hle psprecomp_core)
     add_test(NAME test_p3p_yield COMMAND test_p3p_yield)
+
+    add_executable(test_p3p_ge
+        "${P3P_PROFILE_DIR}/tests/test_p3p_ge.cpp"
+    )
+    target_include_directories(test_p3p_ge PRIVATE
+        "${P3P_PROFILE_DIR}/host"
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_link_libraries(test_p3p_ge PRIVATE p3p_kernel p3p_hle psprecomp_core)
+    add_test(NAME test_p3p_ge COMMAND test_p3p_ge)
 endif()

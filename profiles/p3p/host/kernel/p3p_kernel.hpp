@@ -276,6 +276,14 @@ public:
 
     // sceKernelChangeCurrentThreadAttr core.
     std::int32_t change_current_thread_attr(std::uint32_t clear_mask, std::uint32_t set_mask);
+    // sceKernelGetThreadCurrentPriority / sceKernelChangeThreadPriority
+    // cores (Gate 5C follow-up). A uid of 0 means the current thread.
+    // thread_priority returns the priority or a negative error.
+    // change_thread_priority stores the new priority; the cooperative
+    // scheduler applies it at the next scheduling point (no mid-timeslice
+    // preemption), which is where every guest wait already reschedules.
+    [[nodiscard]] std::int32_t thread_priority(std::int32_t uid) const;
+    std::int32_t change_thread_priority(std::int32_t uid, std::int32_t priority);
 
     // Registers the main module's address span and returns its UID
     // (idempotent). Backs ModuleMgrForUser::sceKernelGetModuleIdByAddress.

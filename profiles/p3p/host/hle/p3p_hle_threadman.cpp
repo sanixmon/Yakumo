@@ -247,6 +247,13 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
         case kNidUnlockMutex:
             set_v0(ctx, kernel.unlock_mutex(a0, static_cast<std::int32_t>(ctx.gpr[5])));
             return true;
+        case kNidGetThreadCurrentPriority:
+            set_v0(ctx, kernel.thread_priority(0));
+            return true;
+        case kNidChangeThreadPriority:
+            set_v0(ctx, kernel.change_thread_priority(
+                            a0, static_cast<std::int32_t>(ctx.gpr[5])));
+            return true;
         case kNidChangeCurrentThreadAttr:
             set_v0(ctx, kernel.change_current_thread_attr(ctx.gpr[4], ctx.gpr[5]));
             return true;

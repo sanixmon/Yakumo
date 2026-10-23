@@ -761,6 +761,25 @@ std::int32_t P3PKernel::change_current_thread_attr(std::uint32_t clear_mask,
     return 0;
 }
 
+std::int32_t P3PKernel::thread_priority(std::int32_t uid) const {
+    if (uid == 0)
+        uid = current_uid_;
+    const auto it = threads_.find(uid);
+    if (it == threads_.end())
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    return it->second.priority;
+}
+
+std::int32_t P3PKernel::change_thread_priority(std::int32_t uid, std::int32_t priority) {
+    if (uid == 0)
+        uid = current_uid_;
+    const auto it = threads_.find(uid);
+    if (it == threads_.end())
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    it->second.priority = priority;
+    return 0;
+}
+
 std::int32_t P3PKernel::register_main_module(std::uint32_t base, std::uint32_t size) {
     if (main_module_uid_ != 0)
         return main_module_uid_;

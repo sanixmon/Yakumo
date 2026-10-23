@@ -1,6 +1,10 @@
 #include "hle/p3p_hle_gedisplay.hpp"
 
+#include "gpu/p3p_ge_executor.hpp"
 #include "kernel/p3p_kernel.hpp"
+
+#include <map>
+#include <vector>
 
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/runtime.hpp"
@@ -34,9 +38,23 @@ constexpr std::uint32_t kNidDisplayWaitVblankStartMultiCB = 0x77ED8B3Au;
 constexpr std::uint32_t kNidDisplayGetVcount = 0x9C6EAAD7u;
 constexpr std::uint32_t kNidDisplayGetFramePerSec = 0xDBA6C4C4u;
 
+struct GeListRecord {
+    std::uint32_t stall = 0;
+    std::uint32_t pc = 0;
+    ge::GeRunStatus status = ge::GeRunStatus::Done;
+    std::vector<ge::GeDrawCall> draws;
+    ge::GeExecStats stats;
+};
+
 struct GeDisplayState {
     std::uint32_t next_list_id = 0;
     std::uint32_t next_callback_id = 0;
+    // Gate 6 WP1: real display-list execution.
+    ge::GeState ge_machine;
+    std::map<std::uint32_t, GeListRecord> ge_lists;
+    std::uint32_t ge_signal_cb = 0;
+    std::uint32_t ge_finish_cb = 0;
+    std::uint32_t ge_log_budget = 12;
     std::uint32_t vcount = 0;
     std::uint32_t mode = 0;
     std::uint32_t width = 480;
@@ -51,6 +69,59 @@ GeDisplayState g_state;
 }  // namespace
 
 void gedisplay_reset_state() { g_state = GeDisplayState{}; }
+
+namespace {
+
+const char *ge_status_name(ge::GeRunStatus status) {
+    switch (status) {
+        case ge::GeRunStatus::Done: return "done";
+        case ge::GeRunStatus::Stalled: return "stalled";
+        case ge::GeRunStatus::Error: return "error";
+    }
+    return "?";
+}
+
+void ge_accumulate(ge::GeExecStats &into, const ge::GeExecStats &add) {
+    into.commands += add.commands;
+    into.draws += add.draws;
+    into.transfers += add.transfers;
+    into.unsupported_draws += add.unsupported_draws;
+    into.signals += add.signals;
+    into.calls += add.calls;
+    into.unknown_opcodes += add.unknown_opcodes;
+    into.finishes += add.finishes;
+}
+
+// Runs (or resumes) one list on the shared GE machine and folds the
+// outcome into its record. Signals go to the registered GE callback.
+void ge_run_list(psprecomp::GuestMemory &memory, P3PKernel *kernel, std::uint32_t id,
+                 GeListRecord &rec, std::uint32_t pc, const char *how) {
+    ge::GeExecStats stats;
+    const ge::GeRunResult res = ge::ge_execute(
+        memory, pc, rec.stall, g_state.ge_machine, rec.draws, stats,
+        [kernel](std::uint32_t behavior, std::uint32_t data) {
+            (void)behavior;
+            if (kernel != nullptr && g_state.ge_signal_cb != 0u)
+                kernel->notify_callback(static_cast<std::int32_t>(g_state.ge_signal_cb),
+                                        static_cast<std::int32_t>(data));
+        });
+    ge_accumulate(rec.stats, stats);
+    rec.status = res.status;
+    rec.pc = res.pc;
+    if (res.status == ge::GeRunStatus::Done && stats.finishes > 0u && kernel != nullptr &&
+        g_state.ge_finish_cb != 0u)
+        kernel->notify_callback(static_cast<std::int32_t>(g_state.ge_finish_cb),
+                                static_cast<std::int32_t>(id));
+    if (g_state.ge_log_budget > 0u) {
+        --g_state.ge_log_budget;
+        std::fprintf(stderr,
+                     "[p3p-ge] list %u %s @%08X: +%u cmds +%u draws +%u xfers -> %s\n", id,
+                     how, pc, stats.commands, stats.draws, stats.transfers,
+                     ge_status_name(res.status));
+    }
+}
+
+}  // namespace
 
 // A vblank wait is a frame-pacing block in the reference kernel: the
 // caller sleeps until the next frame boundary, and that sleep is what lets
@@ -84,24 +155,70 @@ bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexCont
             case kNidGeEdramGetSize:
                 set_v0(0x00200000u);  // 2 MiB EDRAM
                 return true;
-            case kNidGeSetCallback:
-                set_v0(g_state.next_callback_id++);
+            case kNidGeSetCallback: {
+                const std::uint32_t id = g_state.next_callback_id++;
+                g_state.ge_finish_cb = ctx.gpr[4];
+                g_state.ge_signal_cb = ctx.gpr[5];
+                set_v0(id);
                 return true;
+            }
             case kNidGeUnsetCallback:
+                g_state.ge_finish_cb = 0;
+                g_state.ge_signal_cb = 0;
                 set_v0(0);
                 return true;
             case kNidGeListEnQueue:
-            case kNidGeListEnQueueHead:
-                set_v0(g_state.next_list_id++);
+            case kNidGeListEnQueueHead: {
+                const std::uint32_t id = g_state.next_list_id++;
+                // Bound retained history: drop completed records.
+                if (g_state.ge_lists.size() >= 16u) {
+                    for (auto it = g_state.ge_lists.begin(); it != g_state.ge_lists.end();) {
+                        if (it->second.status == ge::GeRunStatus::Done)
+                            it = g_state.ge_lists.erase(it);
+                        else
+                            ++it;
+                    }
+                }
+                GeListRecord rec;
+                rec.stall = ctx.gpr[5];
+                GeListRecord &slot = g_state.ge_lists[id] = std::move(rec);
+                ge_run_list(memory, kernel, id, slot, ctx.gpr[4],
+                            nid == kNidGeListEnQueue ? "enqueue" : "enqueue-head");
+                set_v0(id);
                 return true;
-            case kNidGeListSync:
-            case kNidGeDrawSync:
-                set_v0(0);  // lists complete immediately in the headless model
+            }
+            case kNidGeListSync: {
+                const auto it = g_state.ge_lists.find(ctx.gpr[4]);
+                if (it == g_state.ge_lists.end() || it->second.status == ge::GeRunStatus::Done)
+                    set_v0(0);
+                else if (it->second.status == ge::GeRunStatus::Stalled)
+                    set_v0(3u);  // PSP_GE_DL_STATE_STALL
+                else
+                    set_v0(2u);  // PSP_GE_DL_STATE_DRAWING (error/other)
                 return true;
+            }
+            case kNidGeDrawSync: {
+                bool busy = false;
+                for (const auto &entry : g_state.ge_lists)
+                    if (entry.second.status == ge::GeRunStatus::Stalled)
+                        busy = true;
+                set_v0(busy ? 1u : 0u);
+                return true;
+            }
+            case kNidGeListUpdateStallAddr: {
+                const auto it = g_state.ge_lists.find(ctx.gpr[4]);
+                if (it != g_state.ge_lists.end()) {
+                    it->second.stall = ctx.gpr[5];
+                    if (it->second.status == ge::GeRunStatus::Stalled)
+                        ge_run_list(memory, kernel, ctx.gpr[4], it->second, it->second.pc,
+                                    "stall-update");
+                }
+                set_v0(0);
+                return true;
+            }
             case kNidGeBreak:
             case kNidGeContinue:
             case kNidGeGetCmd:
-            case kNidGeListUpdateStallAddr:
                 set_v0(0);
                 return true;
             default:

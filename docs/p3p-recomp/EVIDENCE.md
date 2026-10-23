@@ -324,3 +324,68 @@ boot (`sceKernelLoadModule`, `sceKernelCreateLwMutex` — whose success
 return is 0 anyway, `sceKernelChangeThreadPriority`,
 `sceKernelGetThreadCurrentPriority`) are not load-bearing for this
 criterion and belong to later gates' scope.
+
+
+---
+
+## Gate 6 WP1 — Display-List Executor (2026-10-23)
+
+Plan: `GATE6_PLAN.md` (authorized 2026-10-23). Recon: P3P's GE import
+surface is just the nine `sceGe_user` calls plus `sceDisplay`; there are
+no `sceFont` imports (text is texture-based). The core framework has no
+renderer; MHP3rd's ~17k-line GPU stack is game-tuned and was used as an
+architecture reference only (notably its address convention).
+
+### What was built
+
+- `profiles/p3p/host/gpu/p3p_ge_executor.{hpp,cpp}`: walks a display
+  list in guest memory (u32 commands, opcode in the top byte),
+  maintaining the GE register file plus resolved address registers.
+  Address rule (per the working in-repo implementation,
+  `profiles/mhp3rd/host/gpu/ge_state.cpp`): `BASE` supplies address
+  bits 24-27 via `(data & 0x000F0000) << 8`, `OFFSETADDR = data << 8`,
+  `relative(arg) = base + offset + arg`; `ORIGIN` re-anchors the offset
+  at its own pc. Handles PRIM (recorded as a draw call with a full
+  register snapshot), TRANSFERSTART (recorded as a transfer), JUMP/
+  BJUMP/CALL/RET/END control flow (32-deep call stack, base/offset
+  saved per frame), SIGNAL (delivered to a handler), FINISH, and the
+  stall address (checked before each command). A run is capped at
+  2^20 commands; out-of-memory fetches end the run as an error.
+- HLE wiring (`p3p_hle_gedisplay`): `sceGeListEnQueue`/`EnQueueHead`
+  now execute the list synchronously on the shared GE machine and keep
+  a per-list record (status, resume pc, draws, stats); `sceGeListSync`
+  answers from the record (0 done / 3 stalled / 2 other);
+  `sceGeListUpdateStallAddr` resumes a stalled list;
+  `sceGeDrawSync` reports busy while any list is stalled;
+  `sceGeSetCallback` captures the guest finish/signal callback UIDs —
+  SIGNAL notifies the signal callback, a finished list notifies the
+  finish callback with the list id. The first 12 list runs log a
+  one-line summary.
+
+### Verification
+
+- `test_p3p_ge`: **19 checks, 0 failures** — state/address resolution,
+  sprite draw decode + register snapshot, JUMP skip, CALL/RET nesting,
+  stall + resume, SIGNAL delivery, transfer recording, ORIGIN
+  anchoring, bare RET, runaway cap. Regressions: services 65/65,
+  yield 83/83, threading 128/128, io 44/44, `verify_boot.sh` **OK**.
+- Boot: the game's real lists decode. List 0 @0x08BB40D4 executes 212
+  commands (a state/setup list, no draws yet); list 1 is enqueued
+  already stalled (stall == list start, the standard "fill then
+  release" pattern) and a later `sceGeListUpdateStallAddr` runs its 29
+  commands to completion.
+
+### Discovered blocker for WP2 (not Gate 6 scope)
+
+Past the CPK opens, the boot spins in a tight
+LoadModule(`disc0:/PSP_GAME/USRDIR/module/libsuppreacc.prx`) →
+StartModule → UnloadModule retry loop (~1.8M iterations in 25 s;
+the fake-UID counter in `p3p_hle_services` is the tally). ModuleMgr
+loading is still the Gate 5-era fake: no image is placed, no registry
+entry exists, so the game's post-load verification can never pass.
+Rendering lists with actual draws are downstream of this. Proposed
+follow-up: **Gate 5D — real module loading** (parse + place the PRX
+image, kernel module registry so GetModuleIdByAddress/GetModuleId
+answer for it, StartModule semantics; PRX code execution strategy —
+recompiled corpus extension vs interpreter — decided from what the
+game actually calls).

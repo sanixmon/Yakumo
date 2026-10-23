@@ -128,7 +128,31 @@ bool hle_services_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexConte
             set_v0(uid != 0 ? static_cast<std::uint32_t>(uid) : kErrorNotFoundUidFunc);
             return true;
         }
-        return false;  // LoadModule & friends stay stubs (later gate)
+        if (nid == 0x977DE386u) {  // sceKernelLoadModule (stopgap)
+            // Real PRX loading is a later gate; log the request and hand
+            // back a plausible module UID so boot can be observed past
+            // this point.
+            std::string path;
+            for (std::uint32_t i = 0; i < 128u && memory.contains(ctx.gpr[4] + i, 1u); ++i) {
+                const char c = static_cast<char>(memory.load8(ctx.gpr[4] + i));
+                if (c == '\0')
+                    break;
+                path += c;
+            }
+            static std::int32_t next_fake_module_uid = 9001;
+            const std::int32_t uid = next_fake_module_uid++;
+            std::fprintf(stderr, "[p3p] load module '%s' -> fake uid %d (NOT loaded)\n",
+                         path.c_str(), uid);
+            set_v0(static_cast<std::uint32_t>(uid));
+            return true;
+        }
+        if (nid == 0x50F0C1ECu) {  // sceKernelStartModule (stopgap, pairs with above)
+            std::fprintf(stderr, "[p3p] start module uid %d (fake, NOT started)\n",
+                         static_cast<std::int32_t>(ctx.gpr[4]));
+            set_v0(0u);
+            return true;
+        }
+        return false;  // other ModuleMgr calls stay stubs (later gate)
     }
 
     if (library == "Kernel_Library") {
