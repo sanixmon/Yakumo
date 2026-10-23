@@ -769,3 +769,75 @@ mode the display framebuffer pointer reads 0 in the periodic
 dumps, so --dump-frame has nothing to point at (VRAM itself is
 fully populated); a fallback to a VRAM bank would restore the
 visual check.
+
+
+## Follow-up: liveness detection + PSMF demuxer (2026-10-23)
+
+Three pieces, landed after the multimedia package, in response to
+a fair challenge: "zero errors in 40M dispatches" is a weak health
+criterion -- a player waiting forever for data produces no errors
+either.
+
+**Liveness / stall detection** (host/p3p_liveness.cpp). The
+runtime heartbeat hook samples the outer-dispatch PC every 250k
+dispatches; over 2M-dispatch windows the unit correlates (a) the
+distinct-PC set, (b) first-ever (library, NID) syscalls fed from
+dispatch_import, and (c) data-movement deltas (ringbuffer packets
+put, AUs delivered, GE pixels, kernel fake clock). A window with at
+most a trickle of new syscalls and a narrow PC set prints one
+[p3p-liveness] evidence line; when every progress delta is zero
+while the fake clock races ahead it says POLLING SUSPECT. The
+window accumulator is unit-tested in test_p3p_services (92 checks).
+It immediately earned its keep: pre-demuxer boots show the movie
+stall as perfectly periodic windows (identical import multisets,
+clock +13.37 s per window, zero data movement).
+
+**The ringbuffer was lying.** A byte probe showed the data area
+still held 0xCC poison at the first RingbufferPut while avail
+claimed 32 packets: this game does NOT write the stream itself --
+sceMpegRingbufferPut must CALL the registered guest callback
+(0x08AB7A14), which reads the file. The kernel's callbacks are
+count-only, so the HLE now detours: Put rewrites the calling
+thread's context into the callback with $ra set to a trampoline PC
+(0x0BADC0DE); the runtime missing-function hook routes the return
+to hle_mpeg_trampoline, which lands the round's bookkeeping
+(avail/write/read advance, byte totals, EOF on a short round) and
+either starts the next round or completes the Put with the real
+packet count -- the same synchronous contract as the reference's
+MipsCall, modelled with the framework's own hooks.
+
+**Minimal PSMF demuxer** in the sceMpeg unit. Stream format
+measured on the actual file: after the 2048-byte PSMF header,
+MPEG-PS packs + PES, one PES per 2048-byte packet; video in 0xE0
+with PTS only on GOP-leading PES; pictures delimited by AUD NAL
+units (type 9), timestamps anchored at each PTS PES and stepped
+3003 (29.97 fps) per picture in decode order; audio ATRAC3+ in
+private stream 0xBD, each PES payload opening with a 4-byte
+big-endian split-frame remainder, frames a continuous 752-byte
+flow (160 kbps, 4180 ticks per frame). GetAvcAu/GetAtracAu hand
+out real AUs (pts/dts, esSize, attr 1/0) from host-side queues;
+packet freeing follows AU consumption. AvcDecode fills a valid
+ABGR8888 black frame (stride x avc height from the PSMF header,
+*initAddr = frame status 1, AU pts advanced to the next picture)
+and AtracDecode 8192 bytes of valid silence -- the contract
+checked by the player (sizes, formats, timestamps, return codes)
+is real, the pixels/samples are synthetic; there is still no
+H.264/ATRAC decoder.
+
+**Boot result (40M dispatches): the opening movie plays end to
+end.** 2997 AvcDecode calls (the full ~100 s at 29.97 fps), the
+audio track fully consumed (2156 frames), readThread exits,
+zero guest errors throughout. Frame dump: the display fb reads 0
+in movie mode, so gedisplay_dump_frame now falls back to VRAM
+bank A (a 522 KB PNG was produced mid-movie).
+
+**Next frontier (not yet authorized): the player's completion
+handshake.** After playback the game stalls again -- now PROVABLY
+a stall, per the detector: 0 new syscalls, narrow PCs, all
+progress deltas zero, clock +35.8 s per window, top imports
+Kernel_Library memcpy/memset (~32% each). End-state threads:
+user_main and displayThread both Ready-spinning at 0x08B1EE30
+(sub_08B1EE20, a 6-instruction wrapper in the player library),
+soundThread in a timed wait in player code, CRI ADX Audio/File
+spinning in their wrappers. The movie is done; whatever the
+player waits for to declare playback finished never fires.

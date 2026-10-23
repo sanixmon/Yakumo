@@ -97,8 +97,16 @@ bool gedisplay_dump_frame(psprecomp::GuestMemory &memory, const std::string &pat
     const std::uint32_t height = g_state.height != 0 ? g_state.height : 272u;
     const std::uint32_t width =
         std::min(g_state.fb_bufferwidth, g_state.width != 0 ? g_state.width : 480u);
-    return write_framebuffer_png(memory, g_state.fb_topaddr, g_state.fb_bufferwidth, width,
-                                 height, g_state.fb_pixelformat, path);
+    // In movie mode the player takes the display over and the recorded
+    // framebuffer pointer reads 0; fall back to VRAM bank A so the
+    // visual check keeps working instead of failing the dump.
+    std::uint32_t fb = g_state.fb_topaddr;
+    if (fb < 0x04000000u || fb >= 0x04200000u) {
+        std::fprintf(stderr, "[p3p-ge] dump: fb %08X unusable, falling back to VRAM bank A\n", fb);
+        fb = 0x04000000u;
+    }
+    return write_framebuffer_png(memory, fb, g_state.fb_bufferwidth, width, height,
+                                 g_state.fb_pixelformat, path);
 }
 
 namespace {
@@ -189,6 +197,8 @@ void wait_vblank(psprecomp::AllegrexContext &ctx, P3PKernel *kernel) {
         kernel->sleep_current(ctx, kFrameUs - (now % kFrameUs));
     }
 }
+
+std::uint32_t hle_gedisplay_pixels_total() { return g_state.raster_stats.pixels_written; }
 
 bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
                             P3PKernel *kernel, const std::string &library, std::uint32_t nid) {

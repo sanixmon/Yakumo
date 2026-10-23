@@ -7,6 +7,7 @@
 #include "hle/p3p_hle_audio.hpp"
 #include "hle/p3p_hle_umd.hpp"
 #include "hle/p3p_hle_mpeg.hpp"
+#include "p3p_liveness.hpp"
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/common.hpp"
@@ -41,6 +42,7 @@ bool stub_seen(const std::string &library, std::uint32_t nid) {
 // $v0; does not touch $pc.
 void dispatch_import(P3PKernel *kernel, const std::string &library, std::uint32_t nid,
                      psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    liveness_note_import(library, nid);
     if (library == kIoFileMgrLibrary && hle_io_dispatch(runtime, ctx, nid))
         return;
     // Gate 5B early services. Kernel-backed units need the kernel; the
@@ -57,7 +59,7 @@ void dispatch_import(P3PKernel *kernel, const std::string &library, std::uint32_
         return;
     if (library == "sceUmdUser" && hle_umd_dispatch(runtime, ctx, nid))
         return;
-    if (library == "sceMpeg" && hle_mpeg_dispatch(runtime, ctx, nid))
+    if (library == "sceMpeg" && hle_mpeg_dispatch(runtime, ctx, kernel, nid))
         return;
     if (kernel != nullptr && library == "sceAudio" &&
         hle_audio_dispatch(runtime, ctx, *kernel, nid))
@@ -313,9 +315,18 @@ bool p3p_unsupported_hook(psprecomp::Runtime &rt, psprecomp::AllegrexContext &,
 
 }  // namespace
 
+bool p3p_missing_function_hook(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
+                               std::uint32_t pc) {
+    // The sceMpeg ringbuffer trampoline is the only fabricated PC the
+    // host sends guests to; anything else is a genuine miss.
+    return hle_mpeg_trampoline(runtime, ctx, pc);
+}
+
 void init_profile(psprecomp::Runtime &runtime, const psprecomp::Elf32Image &elf,
                   std::uint32_t load_base, P3PKernel *kernel, bool aot) {
     g_kernel = kernel;
+    liveness_install(kernel);
+    psprecomp::set_runtime_missing_function_hook(&p3p_missing_function_hook);
     psprecomp::set_runtime_unsupported_hook(&p3p_unsupported_hook);
     psprecomp::set_interpreter_fallback_enabled(true);
     g_import_by_stub.clear();

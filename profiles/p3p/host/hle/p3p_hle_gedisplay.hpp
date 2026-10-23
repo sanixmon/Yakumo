@@ -39,4 +39,8 @@ void gedisplay_set_frame_dump_path(const std::string &path);
 bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
                             P3PKernel *kernel, const std::string &library, std::uint32_t nid);
 
+// Cumulative rasterized pixels across all GE lists so far (the
+// liveness detector diffs this across its windows).
+std::uint32_t hle_gedisplay_pixels_total();
+
 }  // namespace p3p

@@ -52,6 +52,7 @@ add_library(p3p_hle STATIC
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_audio.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_umd.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_mpeg.cpp"
+    "${P3P_PROFILE_DIR}/host/p3p_liveness.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_services.cpp"
     "${P3P_PROFILE_DIR}/host/gpu/p3p_ge_executor.cpp"
     "${P3P_PROFILE_DIR}/host/gpu/p3p_rasterizer.cpp"
