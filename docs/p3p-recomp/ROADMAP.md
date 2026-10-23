@@ -13,7 +13,7 @@ This roadmap defines the strict phase-gate lifecycle for porting Persona 3 Porta
 [Gate 3: Oracle Trace Infrastructure]        -> [PASS SEBAGIAN] (Verified 2026-10-19)
 [Gate 3A: Trace Semantic Alignment]          -> [PASS] (Verified 2026-10-19)
 [Gate 4A: Minimal Threading Specification]   -> [PASS / AUDIT COMPLETE] (Verified 2026-10-19)
-[Gate 4B: Threading HLE Implementation]      -> [READY FOR AUTHORIZATION]
+[Gate 4B: Threading HLE Implementation]      -> [PASS] (Verified 2026-10-23)
 [Gate 5: Headless CPK Mount & File I/O]      -> [NOT STARTED]
 [Gate 6: 2D Graphics Engine to Vulkan]       -> [NOT STARTED]
 [Gate 7: Audio Synthesis (CRI / SAS)]        -> [NOT STARTED]
@@ -90,7 +90,7 @@ This roadmap defines the strict phase-gate lifecycle for porting Persona 3 Porta
   1. Unit tests pass for lifecycle and parameter validation errors.
   2. Recomp trace matches PPSSPP instruction-by-instruction from `0x0880421C` to `0x08804260`.
   3. Call #5 (`jal 0x08B4E6A0`) dispatched identically on both runtimes.
-- **Current Status**: **READY FOR AUTHORIZATION** (Implementation not started).
+- **Current Status**: **PASS** (Implemented and verified 2026-10-23: unit tests 128/128, oracle window 0x0880421C–0x08804260 match, Call #5 dispatched identically. See EVIDENCE.md Gate 4B section.)
 
 ---
 

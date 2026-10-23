@@ -14,7 +14,7 @@ This document tracks authorization, entry criteria, exit criteria, and status fo
 | **Gate 3** | Oracle Trace Infrastructure | **PASS SEBAGIAN** | User | Pre-Seq #5 state divergence observed |
 | **Gate 3A** | Trace Semantic Alignment | **PASS** | User | None (Divergence proven at Call #3 UID return) |
 | **Gate 4A** | Minimal Threading Specification (R1-R3) | **PASS / AUDIT COMPLETE** | User | None (All 4 blockers mathematically resolved) |
-| **Gate 4B** | Threading HLE Implementation | **READY FOR AUTHORIZATION** | Pending User Review | Awaiting explicit approval to begin code implementation |
+| **Gate 4B** | Threading HLE Implementation | **PASS** | User (2026-10-23) | None |
 | **Gate 5** | Headless CPK Mount & File I/O | **NOT STARTED** | — | Prerequisite: Gate 4B PASS |
 | **Gate 6** | 2D Graphics Engine to Vulkan | **NOT STARTED** | — | Prerequisite: Gate 5 PASS |
 | **Gate 7** | Audio Synthesis (CRI / SAS) | **NOT STARTED** | — | Prerequisite: Gate 6 PASS |
@@ -41,7 +41,7 @@ This document tracks authorization, entry criteria, exit criteria, and status fo
 ---
 
 ### Gate 4B: Threading HLE Implementation
-- **Status**: **READY FOR AUTHORIZATION** (NOT STARTED / LOCKED)
+- **Status**: **PASS** (Implemented and verified 2026-10-23; see EVIDENCE.md, Gate 4B section)
 - **Authorized Scope**:
   - `profiles/p3p/host/kernel/p3p_kernel.hpp` & `.cpp`
   - `profiles/p3p/host/hle/p3p_hle_threadman.cpp`
@@ -52,4 +52,4 @@ This document tracks authorization, entry criteria, exit criteria, and status fo
   2. Trace diff against PPSSPP verifies 100% MATCH from `0x0880421C` to `0x08804260`.
   3. Call #5 (`0x08804260`) dispatched identically on both runtimes.
 - **Evidence Required**: Real terminal test logs, `trace_diff.py` output with 0 divergences up to Call #5.
-- **Outstanding Blockers**: Awaiting user's explicit command to begin implementation.
+- **Outstanding Blockers**: None.

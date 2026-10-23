@@ -30,17 +30,13 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 
 ## 3. Current Gate & Milestone Status
 
-- **Latest Completed Gate**: **Gate 4A-R3 (Final Contract & Memory Verification)** — `VERDICT: PASS`
-- **Current Gate Status**: **Gate 4B (HLE Threading Implementation) — READY FOR AUTHORIZATION**
-- **Blockers to Gate 4B Entry**: **NONE (0 Remaining Blockers)**. All mathematical bounds, stack formulas, `$ra` contracts, failure atomicity matrices, and memory allocators have been verified against source code and traces.
-- **2026-10-23 Update**: AOT corpus generated and compiled clean (225/225 objects; see §2 and §5). Executable host wiring plan prepared (`docs/p3p-recomp/HOST_WIRING_PLAN.md`). Gate 4B implementation still requires explicit user authorization.
-- **Authorized Scope for Next Step (Gate 4B)**:
-  1. Implement `p3p_kernel.hpp` & `.cpp` in `profiles/p3p/host/kernel/` (RangeAllocator + Thread Context Lifecycle).
-  2. Implement `p3p_hle_threadman.cpp` in `profiles/p3p/host/hle/` (`sceKernelCreateThread` & `sceKernelStartThread` stubs).
-  3. Execute unit tests and trace oracle verification from `0x0880421C` to `0x08804260`.
+- **Latest Completed Gate**: **Gate 4B (Threading HLE Implementation)** — `VERDICT: PASS` (2026-10-23)
+- **Current Gate Status**: **Gate 5 (Headless CPK Mount & File I/O) — READY FOR AUTHORIZATION**
+- **Gate 4B Results (2026-10-23)**: AOT executable host `p3p` boots the ELF; `p3p_kernel` (RangeAllocator + thread lifecycle) and `p3p_hle_threadman` (Create/Start) implemented per the Gate 4A specification. Unit tests 128/128 pass. Oracle window `0x0880421C`–`0x08804260` matches PPSSPP (see EVIDENCE.md Gate 4B section; `profiles/p3p/scripts/verify_boot.sh` reproduces the full loop). Boot proceeds past Call #5 deep into game init and stops at a guest null dereference caused by a return-0 stub — Gate 5+ HLE territory, not a Gate 4B defect.
+- **Authorized Scope for Next Step (Gate 5)**: Per `GATES.md` / `ROADMAP.md` (virtual disc mount, `umd0.cpk` reading, `IoFileMgrForUser`). Requires explicit user authorization.
 - **Explicitly Prohibited in Next Step**:
   - NO changes to `src/` or `include/psprecomp/`.
-  - NO game boot loop, audio synthesis, or renderer work.
+  - NO renderer or audio work before its gate.
   - NO implementing full `ThreadMan` (semaphores, event flags, mutexes deferred).
 
 ---
@@ -73,6 +69,7 @@ Before resuming or modifying any code, verify existence of:
 - [x] Analysis Data: `/home/ubuntu/recompile/p3p_analysis/p3p_report.json`
 - [x] Generated AOT Corpus: `/home/ubuntu/recompile/yakumo_repo/profiles/p3p/generated/` (224 units + registry; gitignored, regenerable)
 - [x] Corpus Build Tree: `/home/ubuntu/recompile/yakumo_repo/out/p3p-build/` (225/225 objects; `out/p3p` is stale — do not use)
+- [x] AOT Executable Host: `/home/ubuntu/recompile/yakumo_repo/out/p3p-build/profiles/p3p/p3p` (plus `test_p3p_threading`; reproduce with `profiles/p3p/scripts/verify_boot.sh`)
 
 ---
 

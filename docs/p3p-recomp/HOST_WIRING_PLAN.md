@@ -1,6 +1,6 @@
 # HOST_WIRING_PLAN.md — Executable Host Wiring Plan (P3P)
 
-> **Status**: PREPARED 2026-10-23. Planning document only — this plan authorizes **no** implementation by itself.
+> **Status**: EXECUTED 2026-10-23. WP1–WP3 implemented and verified the same day (Gate 4B PASS); this document remains as the design record.
 > **Prerequisites read**: `PROJECT_STATE.md`, `GATES.md`, `ROADMAP.md`, `DECISIONS.md`, `ARCHITECTURE.md`, `reports/gate-4a-final-audit.md`.
 
 ---
@@ -88,3 +88,11 @@ No changes to `src/` or `include/psprecomp/` anywhere in this plan.
 ## 8. Evidence & Bookkeeping
 
 - On completion of each WP: record commands + raw results in `EVIDENCE.md`, update `PROJECT_STATE.md` §3 and `GATES.md` per the session-handoff protocol, and leave the working tree clean (commit + push to `fork/feature/p3p-recomp`).
+
+---
+
+## 9. Outcome (2026-10-23)
+
+- WP1 + WP2 authorized together by the user and implemented: executable target `p3p` (decision 2), default linker sufficed (decision 3: no OOM; the 618 MB corpus links cleanly).
+- WP3 delivered as `scripts/verify_boot.sh` + `scripts/window_diff.py`; the full loop exits 0.
+- Deviations from this plan's assumptions, all documented in EVIDENCE.md: boot argument corrected to 27 bytes (`/PSP_GAME/SYSDIR/EBOOT.BIN` + NUL); user partition clamped to the 32 MiB RAM end; kernel register/stack fidelity aligned to the PPSSPP reference source (`FillStack`, `__KernelStartThread`).

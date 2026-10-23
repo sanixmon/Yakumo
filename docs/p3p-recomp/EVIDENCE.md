@@ -139,3 +139,33 @@ Dumped via `/home/ubuntu/recompile/yakumo_repo/out/framework/dump_function`:
 - `src/runtime.cpp:775-1032`: Hardcoded MHP3rd debug address leaks (`0x08...`) flagged.
 - `profiles/mhp3rd/host/kernel/kernel.cpp:134-185`: TCB layout, stack filling, loader thread start.
 - `profiles/mhp3rd/host/kernel/kernel.cpp:758-835`: RangeAllocator `allocate_block` / `free_block`.
+
+---
+
+## Gate 4B Implementation Evidence (2026-10-23)
+
+### Implementation (all under `profiles/p3p/`, ADR-004 respected; no `src/` changes)
+- `host/kernel/p3p_kernel.hpp` & `.cpp`: coalescing `RangeAllocator` (bottom-up/top-down) + `P3PKernel` thread lifecycle + cooperative scheduler hand-off.
+- `host/hle/p3p_hle_threadman.hpp` & `.cpp`: `ThreadManForUser` NIDs `0x446D8DE6` (CreateThread) and `0xF475845D` (StartThread).
+- `host/p3p_profile.hpp` & `.cpp`: import wiring (HLE bindings for the AOT wrappers, stub-address functions for the interpreter, diagnostic return-0 stubs that log once per NID), exit stub at `0x08800000`.
+- `host/main.cpp`: executable `p3p` linking the `p3p_generated` AOT corpus; `--interpret` mode for oracle tracing.
+- `tests/test_p3p_threading.cpp`; `scripts/verify_boot.sh`; `scripts/window_diff.py`.
+
+### Reference-kernel fidelity (verified against `ppsspp_repo/Core/HLE/sceKernelThread.cpp`)
+- `PSPThread::FillStack`: stack filled `0xFF` at create; UID written at stack bottom; `$k0` TCB fields: UID at `+0xC0`, stack base at `+0xC8`, `0xFFFFFFFF` at `+0xF8`/`+0xFC`.
+- `__KernelStartThread`: `$sp -= aligned arglen`, arguments copied, `$sp -= 64`; `$fp` = initial `$sp`.
+- Registers the kernel does not set are architecturally undefined; the PPSSPP oracle observes them as the Gate 3 boot poison `0xDEADBEEF`, except `$v0`, which is observed `0` at thread entry. The P3P kernel mirrors the observed values.
+- Boot argument is 27 bytes: `/PSP_GAME/SYSDIR/EBOOT.BIN` plus its NUL terminator. (`tools/p3p_trace_runner` used a 32-byte `disc0:/...` string; corrected in `host/main.cpp`.)
+
+### Test results (real terminal output)
+- `test_p3p_threading`: **128 checks, 0 failures** (Gate 4A boundary table, allocator invariants incl. coalescing + double-free, start failure-atomicity matrix, lifecycle + scheduler hand-off, HLE cores).
+- Window diff (`profiles/p3p/scripts/window_diff.py` vs `traces/ppsspp_p3p_trace.jsonl`): `window: ref 15 instructions, recomp 14 instructions` — the single ref-only line is the branch delay slot at `0x08804250`, which the recomp interpreter executes inside the branch without a separate log line; all compared registers match (`pc`, `a0`, `a2`, `a3`, `v0`, `v1`, `gp` exact; `sp`/`a1` stack-relative offsets exact). **WINDOW RESULT: PASS.** The window's last instruction is the Call #5 `jal` at `0x08804260` on both runtimes, and the following instruction is `0x08B4E6A0` on both.
+- AOT boot: `relocated 178513 entries`, `registered 221 import bindings`; loader → user_main hand-off observed live (later crash dump shows `$sp = 0x09FEF8B0` inside user_main's stack block, `$k0 = 0x09FEFF00` = its TCB, `$fp = 0x09FEFEA0` = initial `$sp`). Execution proceeds deep into game init (sceGe/sceDisplay import stubs) and stops at `Guest memory access outside PSP RAM/EDRAM at 0x00000000` from `recomp_unit_0165` (guest_pc `0x08A9B7D8`) — a guest null dereference downstream of a return-0 stub, Gate 5+ scope.
+- Full verification loop: `profiles/p3p/scripts/verify_boot.sh` exits 0.
+
+### Known simplifications / divergences (documented; ADR-002, ADR-003, ARCHITECTURE §6)
+- `$ra` exit stub at `0x08800000` instead of a stack-resident syscall stub (ADR-002); PPSSPP executes two trampoline instructions (`0x08000030`/`0x08000034`) during the switch that have no recomp counterpart.
+- Dynamic UIDs from 100 instead of PPSSPP's observed `0x114` (ADR-003).
+- 32 MiB RAM model: stack bases differ from the 64 MiB PPSSPP trace by design; every stack-relative offset matches.
+- User partition clamped to the RAM end `0x0A000000` (`0x113F000` bytes), not the `0x0A800000` end stated in ARCHITECTURE.md — that figure assumes the 64 MiB model. Flagged for a future documentation correction.
+- `sceKernelStartThread` does not immediately switch to a strictly higher-priority thread (PPSSPP does). The boot path is unaffected (equal priorities; switch happens at loader exit per ARCHITECTURE §5). Deferred beyond Gate 4B.
