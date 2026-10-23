@@ -135,6 +135,7 @@ struct MpegRecord {
     std::int64_t audio_last_pts = -1;
     DemuxAu current_video;       // handed out by GetAvcAu, consumed by AvcDecode
     bool current_video_valid = false;
+    std::int64_t last_video_pts = -1;  // pts of the last video AU handed out
     DemuxAu current_audio;
     bool current_audio_valid = false;
 };
@@ -343,6 +344,7 @@ void demux_feed_audio(MpegRecord &rec, const std::uint8_t *bytes, std::size_t co
 // Advances the parse cursor, filling the AU queues, until the
 // buffered data runs out or both queues hold an AU. Bounded per
 // call so a Get*Au never stalls on a full buffer of the other kind.
+void demux_consume(psprecomp::GuestMemory &memory, MpegRecord &rec, std::uint32_t end_offset);
 void demux_pump(psprecomp::GuestMemory &memory, MpegRecord &rec) {
     const std::uint32_t rb = rec.ringbuffer;
     if (rb == 0u || !memory.contains(rb, 48u))
@@ -935,6 +937,7 @@ bool hle_mpeg_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &
                     rec->current_audio_valid = true;
                     ++g_stat_au_audio;
                 } else {
+                    rec->last_video_pts = au.pts;
                     rec->current_video = std::move(au);
                     rec->current_video_valid = true;
                     ++g_stat_au_video;
@@ -954,10 +957,36 @@ bool hle_mpeg_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &
                 return true;
             }
             if (rec->at_end) {
-                // End of stream: report the last timestamps with
-                // dts = -1, the reference's end signal.
-                const std::int64_t last = audio ? rec->audio_last_pts : -1;
-                write_au(memory, a2, last >= 0 ? last : 0, -1, 0u, 0u);
+                // Every AU has been handed out: free the tail packet
+                // no AU's end offset covers (the last PES only
+                // partially fills it), so the guest ringbuffer avail
+                // reaches zero and sceMpegRingbufferAvailableSize
+                // reports the buffer empty -- the state the game
+                // polls for before it tears the player down. Doing
+                // this at parse time would be wrong: the parser races
+                // far ahead of playback, and the game would start
+                // teardown while its threads are still playing.
+                demux_consume(memory, *rec, static_cast<std::uint32_t>(rec->total_put_bytes));
+                static std::uint32_t s_end_logs[2] = {0u, 0u};
+                if (s_end_logs[audio ? 1 : 0] < 2u) {
+                    ++s_end_logs[audio ? 1 : 0];
+                    std::fprintf(stderr,
+                                 "[p3p-mpeg] get%sau: end-of-stream NO_DATA (dts -1), totals v %llu a %llu\n",
+                                 audio ? "atrac" : "avc",
+                                 (unsigned long long)g_stat_au_video,
+                                 (unsigned long long)g_stat_au_audio);
+                }
+                // End of stream: report the end timestamp with
+                // dts = -1, the reference's end signal. The pts is
+                // the stream's end boundary (last AU pts + one step):
+                // for this title that is exactly the PSMF header's
+                // last timestamp, which is what a player waiting for
+                // pts reached the end needs to see.
+                const std::int64_t last =
+                    audio
+                        ? (rec->audio_last_pts >= 0 ? rec->audio_last_pts + kAudioPtsStep : 0)
+                        : (rec->last_video_pts >= 0 ? rec->last_video_pts + kVideoPtsStep : 0);
+                write_au(memory, a2, last, -1, 0u, 0u);
                 set_v0(ctx, kMpegErrorNoData);
                 return true;
             }
