@@ -30,6 +30,9 @@ inline constexpr std::uint32_t kErrorInvalidUid = 0x80020197u;   // thid <= 0 (G
 inline constexpr std::uint32_t kErrorUnknownUid = 0x80020198u;   // thid not found (Gate 4A matrix)
 inline constexpr std::uint32_t kErrorNotDormant = 0x800201A4u;   // start on non-Dormant thread
 inline constexpr std::uint32_t kErrorDoubleFree = 0x800201B6u;   // allocator double-free (Gate 4A invariant 5)
+inline constexpr std::uint32_t kErrorIllegalArgument = 0x800200D2u;  // SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT
+inline constexpr std::uint32_t kErrorUnknownEvfId = 0x8002019Au;     // SCE_KERNEL_ERROR_UNKNOWN_EVFID
+inline constexpr std::uint32_t kErrorNotFoundUidFunc = 0x800200CEu;  // SCE_KERNEL_ERROR_NOT_FOUND_UIDFUNC
 
 // RangeAllocator allocation types (mirrors sceKernelAllocPartitionMemory).
 inline constexpr int kAllocBottomUp = 0;  // lowest fitting address
@@ -53,6 +56,11 @@ public:
     // Frees the block starting exactly at `address`. Returns 0 on success or
     // kErrorDoubleFree when no live block starts there.
     std::int32_t free_block(std::uint32_t address);
+
+    // Allocates exactly at `address` when [address, address+size) lies fully
+    // inside one free range (sceKernelAllocPartitionMemory PSP_SMEM_Addr).
+    [[nodiscard]] std::optional<std::uint32_t> allocate_at(std::uint32_t address,
+                                                           std::uint32_t size);
 
     [[nodiscard]] bool is_allocated(std::uint32_t address) const;
     [[nodiscard]] std::uint32_t base() const noexcept { return base_; }
@@ -162,11 +170,81 @@ public:
     [[nodiscard]] RangeAllocator &allocator() noexcept { return allocator_; }
     [[nodiscard]] const RangeAllocator &allocator() const noexcept { return allocator_; }
 
+    // --- Gate 5B: memory blocks, callbacks, event flags, main module -----
+    // All UIDs come from the same counter as threads (ADR-003).
+
+    // sceKernelAllocPartitionMemory core. `type` is the PSP_SMEM_* value
+    // (0=Low, 1=High, 2=Addr, 3=LowAligned, 4=HighAligned); for Addr,
+    // `addr` is the requested address, for the Aligned types it is the
+    // alignment. Partitions other than the user partition (2) are served
+    // from the same allocator: the profile models a single partition
+    // (ARCHITECTURE.md section 6). Returns the block UID (> 0) or a
+    // negative error code.
+    std::int32_t alloc_partition_memory(std::int32_t partition, const std::string &name,
+                                        std::int32_t type, std::uint32_t size,
+                                        std::uint32_t addr);
+    // sceKernelFreePartitionMemory core. Returns 0 or a negative error code.
+    std::int32_t free_partition_memory(std::int32_t uid);
+    // sceKernelGetBlockHeadAddr core. Returns 0 when the UID is unknown.
+    [[nodiscard]] std::uint32_t block_head_address(std::int32_t uid) const;
+    [[nodiscard]] std::size_t memory_block_count() const noexcept { return memory_blocks_.size(); }
+
+    // sceKernelCreateCallback/DeleteCallback/CheckCallback cores. Callbacks
+    // belong to the current thread; check_callbacks counts the current
+    // thread's callbacks with a pending notification.
+    std::int32_t create_callback(const std::string &name, std::uint32_t func,
+                                 std::uint32_t arg);
+    std::int32_t delete_callback(std::int32_t uid);
+    std::int32_t notify_callback(std::int32_t uid, std::uint32_t arg);
+    [[nodiscard]] std::int32_t check_callbacks() const;
+
+    // sceKernelCreateEventFlag family cores.
+    std::int32_t create_event_flag(const std::string &name, std::uint32_t attr,
+                                   std::uint32_t init_pattern);
+    std::int32_t delete_event_flag(std::int32_t uid);
+    std::int32_t set_event_flag(std::int32_t uid, std::uint32_t bits);
+    std::int32_t clear_event_flag(std::int32_t uid, std::uint32_t bits);
+    [[nodiscard]] bool event_flag_pattern(std::int32_t uid, std::uint32_t &out) const;
+
+    // sceKernelChangeCurrentThreadAttr core.
+    std::int32_t change_current_thread_attr(std::uint32_t clear_mask, std::uint32_t set_mask);
+
+    // Registers the main module's address span and returns its UID
+    // (idempotent). Backs ModuleMgrForUser::sceKernelGetModuleIdByAddress.
+    std::int32_t register_main_module(std::uint32_t base, std::uint32_t size);
+    [[nodiscard]] std::int32_t module_uid_at(std::uint32_t address) const;
+
 private:
     RangeAllocator allocator_;
     std::map<std::int32_t, P3PThread> threads_;
     std::int32_t next_uid_ = kFirstUid;
     std::int32_t current_uid_ = 0;
+
+    struct MemoryBlock {
+        std::string name;
+        std::int32_t partition = 0;
+        std::uint32_t address = 0;
+        std::uint32_t size = 0;
+    };
+    struct Callback {
+        std::string name;
+        std::int32_t thread_uid = 0;
+        std::uint32_t func = 0;
+        std::uint32_t arg = 0;
+        std::uint32_t notify_count = 0;
+        std::uint32_t notify_arg = 0;
+    };
+    struct EventFlag {
+        std::string name;
+        std::uint32_t attr = 0;
+        std::uint32_t pattern = 0;
+    };
+    std::map<std::int32_t, MemoryBlock> memory_blocks_;
+    std::map<std::int32_t, Callback> callbacks_;
+    std::map<std::int32_t, EventFlag> event_flags_;
+    std::int32_t main_module_uid_ = 0;
+    std::uint32_t main_module_base_ = 0;
+    std::uint32_t main_module_size_ = 0;
 };
 
 }  // namespace p3p

@@ -119,6 +119,33 @@ bool RangeAllocator::is_allocated(std::uint32_t address) const {
     return allocated_.find(address) != allocated_.end();
 }
 
+std::optional<std::uint32_t> RangeAllocator::allocate_at(std::uint32_t address,
+                                                         std::uint32_t size) {
+    if (size == 0u)
+        return std::nullopt;
+    const std::uint64_t block_end = static_cast<std::uint64_t>(address) + size;
+    if (block_end > 0xFFFFFFFFull)
+        return std::nullopt;
+    for (std::size_t i = 0; i < free_ranges_.size(); ++i) {
+        const Range range = free_ranges_[i];
+        const std::uint64_t range_end = static_cast<std::uint64_t>(range.start) + range.size;
+        if (address < range.start || block_end > range_end)
+            continue;
+        std::vector<Range> remainder;
+        if (address > range.start)
+            remainder.push_back(Range{range.start, address - range.start});
+        if (block_end < range_end)
+            remainder.push_back(Range{static_cast<std::uint32_t>(block_end),
+                                      static_cast<std::uint32_t>(range_end - block_end)});
+        free_ranges_.erase(free_ranges_.begin() + static_cast<std::ptrdiff_t>(i));
+        free_ranges_.insert(free_ranges_.begin() + static_cast<std::ptrdiff_t>(i),
+                            remainder.begin(), remainder.end());
+        allocated_[address] = size;
+        return address;
+    }
+    return std::nullopt;
+}
+
 // ---------------------------------------------------------------------------
 // Stack layout (Gate 4A section 1)
 
@@ -312,4 +339,157 @@ bool P3PKernel::exit_current_and_schedule_next(psprecomp::AllegrexContext &live)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Gate 5B: memory blocks, callbacks, event flags, main module
+
+std::int32_t P3PKernel::alloc_partition_memory(std::int32_t partition, const std::string &name,
+                                               std::int32_t type, std::uint32_t size,
+                                               std::uint32_t addr) {
+    if (partition < 1 || partition > 6 || size == 0u || type < 0 || type > 4)
+        return static_cast<std::int32_t>(kErrorIllegalArgument);
+
+    std::optional<std::uint32_t> address;
+    switch (type) {
+        case 0:  // PSP_SMEM_Low
+            address = allocator_.allocate(size, kAllocBottomUp, 256u);
+            break;
+        case 1:  // PSP_SMEM_High
+            address = allocator_.allocate(size, kAllocTopDown, 256u);
+            break;
+        case 2:  // PSP_SMEM_Addr
+            address = allocator_.allocate_at(addr, size);
+            break;
+        case 3:  // PSP_SMEM_LowAligned (addr = alignment)
+        case 4:  // PSP_SMEM_HighAligned
+            if (addr == 0u || (addr & (addr - 1u)) != 0u)
+                return static_cast<std::int32_t>(kErrorIllegalArgument);
+            address = allocator_.allocate(size, type == 3 ? kAllocBottomUp : kAllocTopDown, addr);
+            break;
+    }
+    if (!address)
+        return static_cast<std::int32_t>(kErrorNoMemory);
+
+    const std::int32_t uid = next_uid_++;
+    memory_blocks_[uid] = MemoryBlock{name, partition, *address, size};
+    return uid;
+}
+
+std::int32_t P3PKernel::free_partition_memory(std::int32_t uid) {
+    if (uid <= 0)
+        return static_cast<std::int32_t>(kErrorInvalidUid);
+    const auto it = memory_blocks_.find(uid);
+    if (it == memory_blocks_.end())
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    const std::int32_t result = allocator_.free_block(it->second.address);
+    if (result != 0)
+        return result;
+    memory_blocks_.erase(it);
+    return 0;
+}
+
+std::uint32_t P3PKernel::block_head_address(std::int32_t uid) const {
+    const auto it = memory_blocks_.find(uid);
+    return it == memory_blocks_.end() ? 0u : it->second.address;
+}
+
+std::int32_t P3PKernel::create_callback(const std::string &name, std::uint32_t func,
+                                        std::uint32_t arg) {
+    const std::int32_t uid = next_uid_++;
+    callbacks_[uid] = Callback{name, current_uid_, func, arg, 0u, 0u};
+    return uid;
+}
+
+std::int32_t P3PKernel::delete_callback(std::int32_t uid) {
+    if (uid <= 0)
+        return static_cast<std::int32_t>(kErrorInvalidUid);
+    const auto it = callbacks_.find(uid);
+    if (it == callbacks_.end())
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    callbacks_.erase(it);
+    return 0;
+}
+
+std::int32_t P3PKernel::notify_callback(std::int32_t uid, std::uint32_t arg) {
+    const auto it = callbacks_.find(uid);
+    if (it == callbacks_.end())
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    it->second.notify_count += 1u;
+    it->second.notify_arg = arg;
+    return 0;
+}
+
+std::int32_t P3PKernel::check_callbacks() const {
+    std::int32_t signaled = 0;
+    for (const auto &entry : callbacks_)
+        if (entry.second.thread_uid == current_uid_ && entry.second.notify_count > 0u)
+            ++signaled;
+    return signaled;
+}
+
+std::int32_t P3PKernel::create_event_flag(const std::string &name, std::uint32_t attr,
+                                          std::uint32_t init_pattern) {
+    const std::int32_t uid = next_uid_++;
+    event_flags_[uid] = EventFlag{name, attr, init_pattern};
+    return uid;
+}
+
+std::int32_t P3PKernel::delete_event_flag(std::int32_t uid) {
+    const auto it = event_flags_.find(uid);
+    if (it == event_flags_.end())
+        return static_cast<std::int32_t>(kErrorUnknownEvfId);
+    event_flags_.erase(it);
+    return 0;
+}
+
+std::int32_t P3PKernel::set_event_flag(std::int32_t uid, std::uint32_t bits) {
+    const auto it = event_flags_.find(uid);
+    if (it == event_flags_.end())
+        return static_cast<std::int32_t>(kErrorUnknownEvfId);
+    it->second.pattern |= bits;
+    return 0;
+}
+
+std::int32_t P3PKernel::clear_event_flag(std::int32_t uid, std::uint32_t bits) {
+    const auto it = event_flags_.find(uid);
+    if (it == event_flags_.end())
+        return static_cast<std::int32_t>(kErrorUnknownEvfId);
+    it->second.pattern &= ~bits;
+    return 0;
+}
+
+bool P3PKernel::event_flag_pattern(std::int32_t uid, std::uint32_t &out) const {
+    const auto it = event_flags_.find(uid);
+    if (it == event_flags_.end())
+        return false;
+    out = it->second.pattern;
+    return true;
+}
+
+std::int32_t P3PKernel::change_current_thread_attr(std::uint32_t clear_mask,
+                                                   std::uint32_t set_mask) {
+    const auto it = threads_.find(current_uid_);
+    if (it == threads_.end())
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    it->second.attr = (it->second.attr & ~clear_mask) | set_mask;
+    return 0;
+}
+
+std::int32_t P3PKernel::register_main_module(std::uint32_t base, std::uint32_t size) {
+    if (main_module_uid_ != 0)
+        return main_module_uid_;
+    main_module_uid_ = next_uid_++;
+    main_module_base_ = base;
+    main_module_size_ = size;
+    return main_module_uid_;
+}
+
+std::int32_t P3PKernel::module_uid_at(std::uint32_t address) const {
+    if (main_module_uid_ == 0)
+        return 0;
+    if (address >= main_module_base_ && address - main_module_base_ < main_module_size_)
+        return main_module_uid_;
+    return 0;
+}
+
 }  // namespace p3p
+

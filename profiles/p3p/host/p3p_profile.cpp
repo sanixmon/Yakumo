@@ -1,6 +1,9 @@
 #include "p3p_profile.hpp"
 
 #include "hle/p3p_hle_io.hpp"
+#include "hle/p3p_hle_gedisplay.hpp"
+#include "hle/p3p_hle_services.hpp"
+#include "hle/p3p_hle_sysmem.hpp"
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/common.hpp"
@@ -33,6 +36,20 @@ bool stub_seen(const std::string &library, std::uint32_t nid) {
 void dispatch_import(P3PKernel *kernel, const std::string &library, std::uint32_t nid,
                      psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
     if (library == kIoFileMgrLibrary && hle_io_dispatch(runtime, ctx, nid))
+        return;
+    // Gate 5B early services. Kernel-backed units need the kernel; the
+    // Ge/Display and services units also answer without one (their
+    // kernel-dependent queries degrade to not-found results).
+    if (kernel != nullptr && library == kThreadManLibrary &&
+        hle_threadman_extra_dispatch(runtime, ctx, *kernel, nid))
+        return;
+    if (kernel != nullptr && library == kSysMemLibrary &&
+        hle_sysmem_dispatch(runtime, ctx, *kernel, nid))
+        return;
+    if ((library == kGeLibrary || library == kDisplayLibrary) &&
+        hle_gedisplay_dispatch(runtime, ctx, library, nid))
+        return;
+    if (hle_services_dispatch(runtime, ctx, kernel, library, nid))
         return;
     if (kernel != nullptr && library == kThreadManLibrary && nid == kNidCreateThread) {
         hle_create_thread(runtime, ctx, *kernel);
@@ -103,6 +120,9 @@ void init_profile(psprecomp::Runtime &runtime, const psprecomp::Elf32Image &elf,
         std::fprintf(stderr, "[p3p] registered %zu import bindings (aot=%d, kernel=%d)\n",
                      imports.size(), aot ? 1 : 0, kernel != nullptr ? 1 : 0);
     }
+
+    if (kernel != nullptr)
+        kernel->register_main_module(load_base, P3PKernel::kRamEnd - load_base);
 
     runtime.register_function(P3PKernel::kExitStubAddress, &thread_exit_function,
                               "p3p::thread_exit_stub");

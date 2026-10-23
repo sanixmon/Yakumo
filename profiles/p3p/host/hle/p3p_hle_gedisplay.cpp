@@ -1,0 +1,135 @@
+#include "hle/p3p_hle_gedisplay.hpp"
+
+#include "psprecomp/guest_memory.hpp"
+#include "psprecomp/runtime.hpp"
+
+#include <cstdio>
+
+namespace p3p {
+namespace {
+
+// sceGe_user NIDs.
+constexpr std::uint32_t kNidGeListEnQueue = 0xAB49E76Au;
+constexpr std::uint32_t kNidGeListEnQueueHead = 0x1C0D95A6u;
+constexpr std::uint32_t kNidGeListSync = 0x03444EB4u;
+constexpr std::uint32_t kNidGeDrawSync = 0xB287BD61u;
+constexpr std::uint32_t kNidGeBreak = 0xB448EC0Du;
+constexpr std::uint32_t kNidGeContinue = 0x4C06E472u;
+constexpr std::uint32_t kNidGeSetCallback = 0xA4FC06A4u;
+constexpr std::uint32_t kNidGeUnsetCallback = 0x05DB22CEu;
+constexpr std::uint32_t kNidGeEdramGetAddr = 0xE47E40E4u;
+constexpr std::uint32_t kNidGeEdramGetSize = 0x1F6752ADu;
+constexpr std::uint32_t kNidGeGetCmd = 0xDC93CFEFu;
+constexpr std::uint32_t kNidGeListUpdateStallAddr = 0xE0D68148u;
+
+// sceDisplay NIDs.
+constexpr std::uint32_t kNidDisplaySetMode = 0x0E20F177u;
+constexpr std::uint32_t kNidDisplaySetFrameBuf = 0x289D82FEu;
+constexpr std::uint32_t kNidDisplayGetFrameBuf = 0xEEDA2E54u;
+constexpr std::uint32_t kNidDisplayWaitVblankStart = 0x984C27E7u;
+constexpr std::uint32_t kNidDisplayWaitVblankStartCB = 0x46F186C3u;
+constexpr std::uint32_t kNidDisplayWaitVblankStartMultiCB = 0x77ED8B3Au;
+constexpr std::uint32_t kNidDisplayGetVcount = 0x9C6EAAD7u;
+constexpr std::uint32_t kNidDisplayGetFramePerSec = 0xDBA6C4C4u;
+
+struct GeDisplayState {
+    std::uint32_t next_list_id = 0;
+    std::uint32_t next_callback_id = 0;
+    std::uint32_t vcount = 0;
+    std::uint32_t mode = 0;
+    std::uint32_t width = 480;
+    std::uint32_t height = 272;
+    std::uint32_t fb_topaddr = 0x04000000u;
+    std::uint32_t fb_bufferwidth = 512;
+    std::uint32_t fb_pixelformat = 3;  // 8888
+};
+
+GeDisplayState g_state;
+
+}  // namespace
+
+void gedisplay_reset_state() { g_state = GeDisplayState{}; }
+
+bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
+                            const std::string &library, std::uint32_t nid) {
+    psprecomp::GuestMemory &memory = runtime.memory();
+    const auto set_v0 = [&ctx](std::uint32_t value) { ctx.set_gpr(2, value); };
+
+    if (library == kGeLibrary) {
+        switch (nid) {
+            case kNidGeEdramGetAddr:
+                set_v0(0x04000000u);  // EDRAM base (GuestMemory::kVramPhysicalBase)
+                return true;
+            case kNidGeEdramGetSize:
+                set_v0(0x00200000u);  // 2 MiB EDRAM
+                return true;
+            case kNidGeSetCallback:
+                set_v0(g_state.next_callback_id++);
+                return true;
+            case kNidGeUnsetCallback:
+                set_v0(0);
+                return true;
+            case kNidGeListEnQueue:
+            case kNidGeListEnQueueHead:
+                set_v0(g_state.next_list_id++);
+                return true;
+            case kNidGeListSync:
+            case kNidGeDrawSync:
+                set_v0(0);  // lists complete immediately in the headless model
+                return true;
+            case kNidGeBreak:
+            case kNidGeContinue:
+            case kNidGeGetCmd:
+            case kNidGeListUpdateStallAddr:
+                set_v0(0);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    if (library == kDisplayLibrary) {
+        switch (nid) {
+            case kNidDisplaySetMode:
+                g_state.mode = ctx.gpr[4];
+                g_state.width = ctx.gpr[5];
+                g_state.height = ctx.gpr[6];
+                set_v0(0);
+                return true;
+            case kNidDisplaySetFrameBuf:
+                g_state.fb_topaddr = ctx.gpr[4];
+                g_state.fb_bufferwidth = ctx.gpr[5];
+                g_state.fb_pixelformat = ctx.gpr[6];
+                set_v0(0);
+                return true;
+            case kNidDisplayGetFrameBuf:
+                if (ctx.gpr[4] != 0u) memory.store32(ctx.gpr[4], g_state.fb_topaddr);
+                if (ctx.gpr[5] != 0u) memory.store32(ctx.gpr[5], g_state.fb_bufferwidth);
+                if (ctx.gpr[6] != 0u) memory.store32(ctx.gpr[6], g_state.fb_pixelformat);
+                set_v0(g_state.fb_topaddr);
+                return true;
+            case kNidDisplayWaitVblankStart:
+            case kNidDisplayWaitVblankStartCB:
+                g_state.vcount += 1u;
+                set_v0(0);
+                return true;
+            case kNidDisplayWaitVblankStartMultiCB:
+                g_state.vcount += ctx.gpr[4] != 0u ? ctx.gpr[4] : 1u;
+                set_v0(0);
+                return true;
+            case kNidDisplayGetVcount:
+                set_v0(g_state.vcount);
+                return true;
+            case kNidDisplayGetFramePerSec:
+                ctx.fpr[0] = 59.94f;
+                set_v0(ctx.fpr_bits(0));
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    return false;
+}
+
+}  // namespace p3p

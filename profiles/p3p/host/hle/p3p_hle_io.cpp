@@ -384,10 +384,9 @@ std::int64_t arg_i64(const psprecomp::AllegrexContext &ctx) {
     return static_cast<std::int64_t>(v);
 }
 
-std::uint32_t stack_arg(psprecomp::Runtime &runtime, const psprecomp::AllegrexContext &ctx,
-                        std::uint32_t slot) {
-    return runtime.memory().load32(ctx.gpr[29] + 16u + slot * 4u);
-}
+// EABI: the argument after the a0-a3 block travels in $t0 (for Lseek this
+// is `whence`, following the 64-bit offset in a2/a3).
+std::uint32_t t0_arg(const psprecomp::AllegrexContext &ctx) { return ctx.gpr[8]; }
 
 }  // namespace
 
@@ -439,13 +438,13 @@ bool hle_io_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ct
             }
             case kNidIoLseek: {
                 OpResult r = op_lseek(static_cast<std::int32_t>(ctx.gpr[4]), arg_i64(ctx),
-                                      stack_arg(runtime, ctx, 0));
+                                      t0_arg(ctx));
                 set_result64(ctx, r);
                 return true;
             }
             case kNidIoLseekAsync: {
                 const std::int32_t fd = static_cast<std::int32_t>(ctx.gpr[4]);
-                OpResult r = op_lseek(fd, arg_i64(ctx), stack_arg(runtime, ctx, 0));
+                OpResult r = op_lseek(fd, arg_i64(ctx), t0_arg(ctx));
                 if (r.error == 0) {
                     if (OpenFile *file = find_file(fd)) {
                         file->has_async_result = true;

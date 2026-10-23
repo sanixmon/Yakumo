@@ -222,19 +222,19 @@ void test_hle_cores() {
     psprecomp::Runtime runtime(32u * 1024u * 1024u);
     kernel.bootstrap_loader("loader", 0x08804108u, 0x20, 0x08C42A50u, 0x10000u);
 
-    // Name string + stack-passed attr for create.
+    // Name string + EABI $t0 attr for create.
     const std::uint32_t name_addr = 0x09001000u;
     const char *name = "user_main";
     for (std::uint32_t i = 0; i <= std::strlen(name); ++i)
         runtime.memory().store8(name_addr + i, static_cast<std::uint8_t>(name[i]));
     const std::uint32_t fake_sp = 0x09002000u;
-    runtime.memory().store32(fake_sp + 16u, 0x1234u);  // attr
 
     psprecomp::AllegrexContext ctx{};
     ctx.set_gpr(4, name_addr);
     ctx.set_gpr(5, 0x0880421Cu);
     ctx.set_gpr(6, 0x20u);
     ctx.set_gpr(7, 0x40000u);
+    ctx.set_gpr(8, 0x1234u);  // attr (EABI $t0)
     ctx.set_gpr(28, 0x08C42A50u);
     ctx.set_gpr(29, fake_sp);
     const std::int32_t uid = hle_create_thread(runtime, ctx, kernel);

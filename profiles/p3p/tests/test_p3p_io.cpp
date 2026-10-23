@@ -116,7 +116,7 @@ int main() {
     ctx.gpr[4] = static_cast<std::uint32_t>(fd);
     ctx.gpr[6] = 6;
     ctx.gpr[7] = 0;
-    runtime.memory().store32(ctx.gpr[29] + 16u, 0u);  // whence SEEK_SET (stack arg)
+    ctx.gpr[8] = 0u;  // whence SEEK_SET (EABI $t0)
     check(call_io(p3p::kNidIoLseek) == 6u && ctx.gpr[3] == 0u, "lseek SET returns pos");
     ctx.gpr[4] = static_cast<std::uint32_t>(fd);
     ctx.gpr[5] = kBufAddr;
@@ -127,7 +127,7 @@ int main() {
     ctx.gpr[4] = static_cast<std::uint32_t>(fd);
     ctx.gpr[6] = 0xFFFFFFFCu;  // -4 low
     ctx.gpr[7] = 0xFFFFFFFFu;  // -4 high
-    runtime.memory().store32(ctx.gpr[29] + 16u, 2u);  // SEEK_END
+    ctx.gpr[8] = 2u;  // whence SEEK_END (EABI $t0)
     check(call_io(p3p::kNidIoLseek) == 11u, "lseek END-4 returns 15-4=11");
     check(call_io1(p3p::kNidIoClose, static_cast<std::uint32_t>(fd)) == 0u, "close ok");
     ctx.gpr[4] = static_cast<std::uint32_t>(fd);
