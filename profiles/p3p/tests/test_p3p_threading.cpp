@@ -180,6 +180,14 @@ void test_kernel_lifecycle() {
     CHECK(kernel.find_thread(100)->status == ThreadStatus::Deleted);
     CHECK(kernel.find_thread(101)->status == ThreadStatus::Running);
 
+    // sceKernelDeleteThread (PPSSPP semantics): the exited loader is
+    // already Deleted in this kernel, so deleting it succeeds; the
+    // current thread and unknown uids are refused.
+    CHECK_EQ(kernel.delete_thread(100), 0);
+    CHECK_EQ(kernel.delete_thread(101), as_err(kErrorNotDormant));
+    CHECK_EQ(kernel.delete_thread(9999), as_err(0x80020198u));
+    CHECK_EQ(kernel.delete_thread(0), as_err(0x80020198u));
+
     // No Ready thread remains.
     CHECK(!kernel.exit_current_and_schedule_next(live));
 }
@@ -268,6 +276,42 @@ void test_hle_cores() {
     CHECK_EQ(hle_create_thread(runtime, bad_ctx, kernel), as_err(kErrorIllegalAddr));
 }
 
+void test_wait_thread_end() {
+    using namespace p3p;
+    psprecomp::Runtime runtime(32u * 1024u * 1024u);
+    P3PKernel kernel;
+    const std::int32_t loader =
+        kernel.bootstrap_loader("loader", 0x08804108, 0x20, 0, 0x10000);
+    CHECK(loader == 100);
+    const std::int32_t worker = kernel.create_thread(
+        "worker", 0x08807000, 0x30, 0x10000, 0, 0, runtime.memory());
+    CHECK(worker == 101);
+    CHECK(kernel.start_thread(worker, 0, 0, runtime.memory()) == 0);
+
+    // The loader blocks waiting for the worker to end; control passes
+    // to the worker.
+    psprecomp::AllegrexContext live{};
+    kernel.note_wait_thread_end(worker, false, 0);
+    CHECK(kernel.block_current(live));
+    CHECK(kernel.current_uid() == worker);
+    const P3PThread *loader_rec = kernel.find_thread(loader);
+    CHECK(loader_rec != nullptr && loader_rec->status == ThreadStatus::Waiting &&
+          loader_rec->wait_kind == P3PThread::WaitKind::ThreadEnd &&
+          loader_rec->wait_thread_uid == worker);
+
+    // The worker exits with status 7: the waiter is readied with the
+    // hand-off recorded, and exiting hands control back to the loader.
+    live.pc = 0x08807000;
+    CHECK(kernel.exit_current_and_schedule_next(live, 7));
+    CHECK(kernel.current_uid() == loader);
+    loader_rec = kernel.find_thread(loader);
+    CHECK(loader_rec != nullptr && loader_rec->status == ThreadStatus::Running);
+    std::int32_t result = -1;
+    CHECK(kernel.take_thread_end_result(worker, result));
+    CHECK(result == 7);
+    CHECK(!kernel.take_thread_end_result(worker, result));
+}
+
 }  // namespace
 
 int main() {
@@ -276,6 +320,7 @@ int main() {
     test_kernel_lifecycle();
     test_start_failure_matrix();
     test_hle_cores();
+    test_wait_thread_end();
     std::printf("test_p3p_threading: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -131,7 +131,7 @@ struct P3PThread {
     // the wait so the kernel can re-evaluate satisfaction when bits change;
     // the blocked call itself stays pointed at its import stub in the saved
     // context and is re-dispatched when the thread is scheduled again.
-    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3, ThreadSleep = 4, Semaphore = 5 };
+    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3, ThreadSleep = 4, Semaphore = 5, ThreadEnd = 6 };
     WaitKind wait_kind = WaitKind::None;
     std::int32_t wait_evf_uid = 0;
     std::uint32_t wait_pattern = 0;
@@ -150,6 +150,14 @@ struct P3PThread {
     // re-dispatched wait completes through wait_semaphore's hand-off
     // branch instead of deducting again.
     std::int32_t sema_handed_uid = 0;
+    // sceKernelWaitThreadEnd: the thread this one is blocked on, the
+    // hand-off marker set when that thread exits (the re-dispatched
+    // wait then returns thread_end_result), and this thread's own exit
+    // status once it has exited.
+    std::int32_t wait_thread_uid = 0;
+    std::int32_t thread_end_handed_uid = 0;
+    std::int32_t thread_end_result = 0;
+    std::int32_t exit_status = 0;
     // Gate 5C timed waits (DelayThread, vblank pacing, audio drain): while
     // timed_wait is set, a Waiting thread becomes Ready again once the
     // kernel's fake clock reaches wake_at_us.
@@ -204,7 +212,13 @@ public:
     // thread Dead, reclaims its stack, then loads the highest-priority Ready
     // thread's context into `live` and marks it Running. Returns false when
     // no Ready thread remains (`live` is then untouched).
-    bool exit_current_and_schedule_next(psprecomp::AllegrexContext &live);
+    bool exit_current_and_schedule_next(psprecomp::AllegrexContext &live,
+                                        std::int32_t exit_status = 0);
+    // sceKernelWaitThreadEnd support: record the current thread as
+    // blocked on `uid` (optionally with a fake-clock timeout), and the
+    // hand-off probe the re-dispatched wait uses to complete.
+    void note_wait_thread_end(std::int32_t uid, bool has_timeout, std::uint64_t timeout_us);
+    bool take_thread_end_result(std::int32_t uid, std::int32_t &out);
 
     // Gate 5C cooperative scheduling points. yield_current saves the live
     // context into the current thread, marks it Ready, and loads the
@@ -302,6 +316,12 @@ public:
     std::int32_t create_callback(const std::string &name, std::uint32_t func,
                                  std::uint32_t arg);
     std::int32_t delete_callback(std::int32_t uid);
+    // sceKernelDeleteThread (PPSSPP semantics): only a thread that has
+    // already stopped may be deleted. This kernel transitions exiting
+    // threads straight to Deleted (stack freed), so deleting an exited
+    // thread is a successful no-op; deleting a live or current thread
+    // is NOT_DORMANT; an unknown uid is ILLEGAL_THREAD_ID.
+    std::int32_t delete_thread(std::int32_t uid);
     std::int32_t notify_callback(std::int32_t uid, std::uint32_t arg);
     [[nodiscard]] std::int32_t check_callbacks() const;
 

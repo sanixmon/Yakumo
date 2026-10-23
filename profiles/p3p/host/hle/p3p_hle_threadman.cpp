@@ -111,6 +111,53 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
             set_v0(ctx, kernel.create_callback(name, ctx.gpr[5], ctx.gpr[6]));
             return true;
         }
+        case 0x9FA03CD3u:  // sceKernelDeleteThread
+            set_v0(ctx, kernel.delete_thread(a0));
+            return true;
+        case 0x278C0DF5u: {  // sceKernelWaitThreadEnd(uid, timeoutPtr)
+            // Completion hand-off from the target's exit.
+            std::int32_t exit_result = 0;
+            if (kernel.take_thread_end_result(a0, exit_result)) {
+                set_v0(ctx, exit_result);
+                return true;
+            }
+            const P3PThread *target = kernel.find_thread(a0);
+            if (target == nullptr || a0 == kernel.current_uid()) {
+                set_v0(ctx, static_cast<std::int32_t>(0x80020198u));  // ILLEGAL_THREAD_ID
+                return true;
+            }
+            if (target->status == ThreadStatus::Dead ||
+                target->status == ThreadStatus::Deleted) {
+                set_v0(ctx, target->exit_status);
+                return true;
+            }
+            // Target still alive. A re-dispatch whose wait record is
+            // gone was woken by its timeout (the exit wake records a
+            // hand-off instead): report the timeout rather than
+            // blocking again.
+            const P3PThread *self = kernel.find_thread(kernel.current_uid());
+            if (self != nullptr && self->wait_thread_uid == a0 &&
+                self->wait_kind != P3PThread::WaitKind::ThreadEnd) {
+                kernel.clear_wait();
+                set_v0(ctx, static_cast<std::int32_t>(kErrorWaitTimeout));
+                return true;
+            }
+            const std::uint32_t timeout_addr = ctx.gpr[5];
+            const bool has_timeout =
+                timeout_addr != 0u && memory.contains(timeout_addr, 4u);
+            const std::uint32_t timeout_us =
+                has_timeout ? memory.load32(timeout_addr) : 0u;
+            if (has_timeout && timeout_us == 0u) {
+                set_v0(ctx, static_cast<std::int32_t>(kErrorWaitTimeout));
+                return true;
+            }
+            kernel.note_wait_thread_end(a0, has_timeout, timeout_us);
+            if (kernel.block_current(ctx))
+                return true;
+            kernel.clear_wait();
+            set_v0(ctx, static_cast<std::int32_t>(kErrorWaitTimeout));
+            return true;
+        }
         case kNidDeleteCallback:
             set_v0(ctx, kernel.delete_callback(a0));
             return true;
@@ -303,8 +350,10 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
             set_v0(ctx, 0);
             return true;
         }
-        case kNidSignalSema:
+        case kNidSignalSema: {
             set_v0(ctx, kernel.signal_semaphore(a0, static_cast<std::int32_t>(ctx.gpr[5])));
+            return true;
+        }
             return true;
         case kNidPollSema:
             set_v0(ctx, kernel.poll_semaphore(a0, static_cast<std::int32_t>(ctx.gpr[5])));
@@ -351,7 +400,8 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
             kernel.sleep_current(ctx, ctx.gpr[4]);
             return true;
         case kNidExitThread:
-            if (!kernel.exit_current_and_schedule_next(ctx))
+            if (!kernel.exit_current_and_schedule_next(
+                    ctx, static_cast<std::int32_t>(ctx.gpr[4])))
                 runtime.stop("p3p: sceKernelExitThread with no ready thread remaining");
             return true;
         default:

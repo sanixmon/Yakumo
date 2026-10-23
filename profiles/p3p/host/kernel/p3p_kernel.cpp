@@ -310,18 +310,34 @@ std::int32_t P3PKernel::start_thread(std::int32_t thid, std::uint32_t arglen, st
     return 0;
 }
 
-bool P3PKernel::exit_current_and_schedule_next(psprecomp::AllegrexContext &live) {
+bool P3PKernel::exit_current_and_schedule_next(psprecomp::AllegrexContext &live,
+                                               std::int32_t exit_status) {
     if (current_uid_ != 0) {
         if (P3PThread *current = [&]() -> P3PThread * {
                 const auto it = threads_.find(current_uid_);
                 return it == threads_.end() ? nullptr : &it->second;
             }()) {
             current->status = ThreadStatus::Dead;
+            current->exit_status = exit_status;
             if (current->stack_address != 0u) {
                 allocator_.free_block(current->stack_address);
                 current->stack_address = 0u;
             }
             current->status = ThreadStatus::Deleted;
+            // Wake sceKernelWaitThreadEnd waiters on this thread: their
+            // re-dispatched wait completes with the exit status through
+            // the hand-off fields (the semaphore idiom).
+            for (auto &[wuid, waiter] : threads_) {
+                if (waiter.status == ThreadStatus::Waiting &&
+                    waiter.wait_kind == P3PThread::WaitKind::ThreadEnd &&
+                    waiter.wait_thread_uid == current_uid_) {
+                    waiter.status = ThreadStatus::Ready;
+                    waiter.wait_kind = P3PThread::WaitKind::None;
+                    waiter.timed_wait = false;
+                    waiter.thread_end_handed_uid = current_uid_;
+                    waiter.thread_end_result = exit_status;
+                }
+            }
         }
         current_uid_ = 0;
     }
@@ -412,6 +428,8 @@ bool P3PKernel::wake_due_timed_waiters() {
             thread.wake_at_us <= now_us_) {
             thread.status = ThreadStatus::Ready;
             thread.timed_wait = false;
+            if (thread.wait_kind == P3PThread::WaitKind::ThreadEnd)
+                thread.wait_kind = P3PThread::WaitKind::None;
         }
     }
     return true;
@@ -483,6 +501,7 @@ void P3PKernel::clear_wait() {
     }
     it->second.wait_kind = P3PThread::WaitKind::None;
     it->second.wait_evf_uid = 0;
+    it->second.wait_thread_uid = 0;
 }
 
 void P3PKernel::wake_event_flag_waiters(std::int32_t evf_uid) {
@@ -771,6 +790,30 @@ std::int32_t P3PKernel::signal_semaphore(std::int32_t uid, std::int32_t count) {
     return 0;
 }
 
+void P3PKernel::note_wait_thread_end(std::int32_t uid, bool has_timeout,
+                                     std::uint64_t timeout_us) {
+    const auto it = threads_.find(current_uid_);
+    if (it == threads_.end())
+        return;
+    it->second.wait_kind = P3PThread::WaitKind::ThreadEnd;
+    it->second.wait_thread_uid = uid;
+    if (has_timeout) {
+        it->second.timed_wait = true;
+        it->second.wake_at_us = now_us_ + timeout_us;
+    }
+}
+
+bool P3PKernel::take_thread_end_result(std::int32_t uid, std::int32_t &out) {
+    const auto it = threads_.find(current_uid_);
+    if (it == threads_.end() || it->second.thread_end_handed_uid != uid ||
+        uid == 0)
+        return false;
+    out = it->second.thread_end_result;
+    it->second.thread_end_handed_uid = 0;
+    it->second.wait_thread_uid = 0;
+    return true;
+}
+
 void P3PKernel::note_wait_semaphore(std::int32_t sema_uid, std::int32_t count) {
     const auto it = threads_.find(current_uid_);
     if (it == threads_.end())
@@ -862,6 +905,23 @@ std::int32_t P3PKernel::delete_callback(std::int32_t uid) {
     if (it == callbacks_.end())
         return static_cast<std::int32_t>(kErrorUnknownUid);
     callbacks_.erase(it);
+    return 0;
+}
+
+std::int32_t P3PKernel::delete_thread(std::int32_t uid) {
+    // Reference semantics (PPSSPP sceKernelDeleteThread): deleting a
+    // thread that has not exited yet is an error, NOT_DORMANT; a
+    // thread that already exited (record status Deleted) deletes
+    // cleanly; unknown ids are ILLEGAL_THREAD_ID.
+    constexpr std::int32_t kErrorIllegalThreadId = static_cast<std::int32_t>(0x80020198u);
+    constexpr std::int32_t kErrorNotDormant = static_cast<std::int32_t>(0x800201A4u);
+    if (uid == 0)
+        return kErrorIllegalThreadId;
+    const auto it = threads_.find(uid);
+    if (it == threads_.end())
+        return kErrorIllegalThreadId;
+    if (uid == current_uid_ || it->second.status != ThreadStatus::Deleted)
+        return kErrorNotDormant;
     return 0;
 }
 
