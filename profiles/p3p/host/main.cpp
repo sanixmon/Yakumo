@@ -20,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include "hle/p3p_hle_gedisplay.hpp"
 
 #ifdef P3P_HAS_GENERATED
 namespace psprecomp {
@@ -29,13 +30,14 @@ void register_generated_functions(Runtime &runtime);
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: p3p <ELF> [--max-dispatches N] [--interpret] [--game-root DIR]\n");
+        std::fprintf(stderr, "Usage: p3p <ELF> [--max-dispatches N] [--interpret] [--game-root DIR] [--dump-frame FILE]\n");
         return 1;
     }
     const std::filesystem::path elf_path = argv[1];
     std::uint64_t max_dispatches = 10'000'000u;
     bool interpret = false;
     std::filesystem::path game_root;
+    std::filesystem::path dump_frame;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--max-dispatches" && i + 1 < argc)
@@ -44,6 +46,8 @@ int main(int argc, char **argv) {
             interpret = true;
         else if (arg == "--game-root" && i + 1 < argc)
             game_root = argv[++i];
+        else if (arg == "--dump-frame" && i + 1 < argc)
+            dump_frame = argv[++i];
     }
 
     try {
@@ -100,6 +104,8 @@ int main(int argc, char **argv) {
         runtime.cpu().set_gpr(5, path_addr);     // $a1
         runtime.cpu().set_gpr(31, p3p::P3PKernel::kExitStubAddress);  // $ra
 
+        if (!dump_frame.empty())
+            p3p::gedisplay_set_frame_dump_path(dump_frame.string());
         std::fprintf(stderr, "[p3p] starting at entry %s (aot=%d, max_dispatches=%llu)\n",
                      psprecomp::hex32(entry).c_str(), aot ? 1 : 0,
                      static_cast<unsigned long long>(max_dispatches));
@@ -107,6 +113,19 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "[p3p] stopped: %s\n", runtime.stop_reason().c_str());
         std::fprintf(stderr, "[p3p] kernel: %zu threads, current uid %d\n",
                      kernel.thread_count(), kernel.current_uid());
+        kernel.dump_thread_states(stderr);
+        std::fprintf(stderr, "[p3p] live cpu: pc %s a0 %s a1 %s a2 %s a3 %s sp %s\n",
+                     psprecomp::hex32(runtime.cpu().pc).c_str(),
+                     psprecomp::hex32(runtime.cpu().gpr[4]).c_str(),
+                     psprecomp::hex32(runtime.cpu().gpr[5]).c_str(),
+                     psprecomp::hex32(runtime.cpu().gpr[6]).c_str(),
+                     psprecomp::hex32(runtime.cpu().gpr[7]).c_str(),
+                     psprecomp::hex32(runtime.cpu().gpr[29]).c_str());
+        if (!dump_frame.empty()) {
+            const bool ok = p3p::gedisplay_dump_frame(runtime.memory(), dump_frame.string());
+            std::fprintf(stderr, "[p3p] frame dump %s: %s\n", ok ? "written" : "FAILED",
+                         dump_frame.string().c_str());
+        }
         return 0;
     } catch (const std::exception &e) {
         std::fprintf(stderr, "[p3p] error: %s\n", e.what());

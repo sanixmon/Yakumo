@@ -453,3 +453,68 @@ the problem.
   spawns 'sas thread' + 'SDK WRAP', and begins sceSasCore
   initialization (Gate 7 territory), settling into its thread
   rotation. The road to Gate 6 WP2 (draws/frame dump) is open.
+
+
+---
+
+## Gate 6 WP2 — Software Rasterizer + Frame Dump (2026-10-23)
+
+Plan: `GATE6_PLAN.md` WP2. The rasterizer back end for the WP1
+executor, plus the discoveries WP2's boot verification forced.
+
+### What was built
+
+- **`host/gpu/p3p_rasterizer`**: consumes recorded draw calls and
+  renders into guest memory. Through-mode only (transformed draws
+  counted + skipped; 3D is Gate 8): sprites, triangles, strips, fans,
+  points; vertex decode for the GE layouts (tc u8/u16/float, color
+  565/5551/4444/8888, position s8/s16/float; through texcoords carry
+  5 fractional bits, through s16 positions and OFFSETX/Y are 12.4);
+  texturing with nearest sampling — direct formats, CLUT4/8/16 with
+  the CLUTFORMAT shift/mask/start semantics, PSP swizzle (16-byte x
+  8-row blocks); alpha blending (GE factor/equation encoding incl.
+  fixed colors); alpha test; VRAM block transfers (PPSSPP register
+  semantics). Wired into the GE HLE: each list run rasterizes its new
+  draws immediately, using the display pixel format as the target
+  format (the GE has no framebuffer-format register).
+- **`host/gpu/p3p_frame_dump`**: dependency-free PNG writer (zlib
+  stored blocks) + framebuffer conversion. The host flag
+  `--dump-frame FILE` dumps at exit AND every 240 vblanks mid-run —
+  a headless boot that never exits by budget still produces frames.
+- **Diagnostics that earned their keep**: `kernel.dump_thread_states`
+  (per-thread status/wait target/saved pc) + a live-CPU register line
+  at exit, both in the host. They cracked the two stalls below.
+- `test_p3p_rasterizer`: **16 checks, 0 failures** (sprite fill,
+  CLUT8 sampling, transfer strides, triangle coverage, alpha blend
+  math, non-through skip). Boot regressions all green; verify_boot OK.
+
+### Boot findings (the frame is still black — and we know exactly why)
+
+1. **The "settle" was a stubbed syscall.** `sceKernelSleepThread`
+   (0x9ACE131E) was a return-0 stub; the 'SDK WRAP' thread's main
+   loop is work + SleepThread, so it spun at full speed and starved
+   the cooperative scheduler (guest clock frozen at t=28.7ms). Fixed
+   properly in this WP: kernel ThreadSleep waits + wakeup counts,
+   `sceKernelWakeupThread` (0xD59EAD2F). SDK WRAP now sleeps, the
+   clock advances, user_main runs.
+2. **The boot then STOPS (not hangs)** at guest t≈534ms:
+   `Unsupported Allegrex instruction 0x66818102 at 0x08B5737C:
+   vfpu1 not lowered yet`. The corpus contains a handful of
+   unsupported traps (`rt.unsupported`) in units 0212/0214/0216/0217:
+   the VFPU pair 0x66818102/0x66808003 at several sites, VFPU4-group
+   0xD03Cxxxx words, and 0x000001CD — the original analysis counted
+   6 unsupported occurrences. The init path user_main runs into
+   (via the helper at 0x08B57150) needs them.
+3. The display framebuffer is therefore still untouched VRAM
+   (480x272, one color) — the dump pipeline itself is verified.
+
+### Proposed next step (needs authorization)
+
+**Interpreter fallback for trap-bearing functions**: the runtime
+already falls back to its interpreter for unresolved addresses
+(`run_interpreter_fallback`). If the profile skips registering the
+few AOT functions that contain `rt.unsupported` traps, calls into
+them execute interpreted (slow, but these are init-path functions)
+and the AOT boot proceeds. Identification: map trap addresses to
+function entries via the analysis function table. Fallback if the
+interpreter also lacks the encodings: lower the specific VFPU ops.

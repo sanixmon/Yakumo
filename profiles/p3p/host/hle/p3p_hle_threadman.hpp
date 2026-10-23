@@ -11,6 +11,8 @@ namespace p3p {
 class P3PKernel;
 
 inline constexpr std::uint32_t kNidCreateThread = 0x446D8DE6u;
+inline constexpr std::uint32_t kNidSleepThread = 0x9ACE131Eu;
+inline constexpr std::uint32_t kNidWakeupThread = 0xD59EAD2Fu;
 inline constexpr std::uint32_t kNidStartThread = 0xF475845Du;
 inline constexpr std::uint32_t kNidCreateCallback = 0xE81CAF8Fu;
 inline constexpr std::uint32_t kNidDeleteCallback = 0xEDBA5844u;

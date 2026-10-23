@@ -261,6 +261,20 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
             g_fake_time_us += 100u;
             set_v0(ctx, static_cast<std::int32_t>(g_fake_time_us));
             return true;
+        case kNidSleepThread:
+            // Blocks indefinitely until another thread calls
+            // sceKernelWakeupThread. (As a return-0 stub this was the
+            // boot's late freeze: the 'SDK WRAP' thread's main loop is
+            // work + SleepThread, so the stub made it spin at full
+            // speed and starve every other thread.)
+            set_v0(ctx, 0);
+            ctx.pc = ctx.gpr[31];
+            kernel.sleep_thread_current(ctx);
+            return true;
+        case kNidWakeupThread:
+            set_v0(ctx, static_cast<std::uint32_t>(kernel.wakeup_thread(
+                            static_cast<std::int32_t>(ctx.gpr[4]))));
+            return true;
         case kNidDelayThread:
         case kNidDelayThreadCB:
             g_fake_time_us += ctx.gpr[4];

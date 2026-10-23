@@ -16,6 +16,7 @@
 #include "psprecomp/guest_memory.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <string>
@@ -128,12 +129,13 @@ struct P3PThread {
     // the wait so the kernel can re-evaluate satisfaction when bits change;
     // the blocked call itself stays pointed at its import stub in the saved
     // context and is re-dispatched when the thread is scheduled again.
-    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3 };
+    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3, ThreadSleep = 4 };
     WaitKind wait_kind = WaitKind::None;
     std::int32_t wait_evf_uid = 0;
     std::uint32_t wait_pattern = 0;
     std::uint32_t wait_mode = 0;
     std::int32_t wait_mutex_uid = 0;
+    std::int32_t wakeup_count = 0;  // pending sceKernelWakeupThread calls
     std::int32_t wait_mutex_count = 0;
     // Set when an unlock handed this thread ownership of a mutex while it
     // was blocked in LockMutex: its re-dispatched lock call completes
@@ -210,6 +212,15 @@ public:
     // is Ready, rescheduling skips the clock forward to the next wake, so
     // a lone sleeping thread simply continues after its (virtual) delay.
     bool sleep_current(psprecomp::AllegrexContext &live, std::uint64_t duration_us);
+    // sceKernelSleepThread core: blocks the current thread indefinitely
+    // (WaitKind::ThreadSleep) until wakeup_thread. A pending wakeup
+    // count is consumed instead and the call does not block (returns
+    // false). Returns true when the thread actually blocked (its saved
+    // context already points past the call).
+    bool sleep_thread_current(psprecomp::AllegrexContext &live);
+    // sceKernelWakeupThread core: wakes a ThreadSleep waiter, or banks
+    // a wakeup count on the target. 0 on success, error code otherwise.
+    std::int32_t wakeup_thread(std::int32_t uid);
     [[nodiscard]] std::uint64_t now_us() const noexcept { return now_us_; }
 
     // Records (or clears, with clear_wait) the current thread's pending
@@ -310,6 +321,9 @@ public:
     bool set_module_started(std::int32_t uid, bool started);
     // Removes the record and frees its partition block. False if unknown.
     bool unregister_module(std::int32_t uid);
+
+    // Diagnostics: one line per thread (status, wait target, saved pc).
+    void dump_thread_states(std::FILE *out) const;
 
 private:
     P3PThread *pick_ready_excluding(std::int32_t excluded_uid);

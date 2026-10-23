@@ -429,6 +429,34 @@ bool P3PKernel::sleep_current(psprecomp::AllegrexContext &live, std::uint64_t du
     return switch_away(live, ThreadStatus::Waiting, true, now_us_ + duration_us, "sleep");
 }
 
+bool P3PKernel::sleep_thread_current(psprecomp::AllegrexContext &live) {
+    const auto it = threads_.find(current_uid_);
+    if (it == threads_.end())
+        return false;
+    if (it->second.wakeup_count > 0) {
+        --it->second.wakeup_count;
+        return false;  // a wakeup was already banked: do not block
+    }
+    it->second.wait_kind = P3PThread::WaitKind::ThreadSleep;
+    return switch_away(live, ThreadStatus::Waiting, false, 0, "sleepthread");
+}
+
+std::int32_t P3PKernel::wakeup_thread(std::int32_t uid) {
+    const auto it = threads_.find(uid);
+    if (it == threads_.end() || it->second.status == ThreadStatus::Deleted ||
+        it->second.status == ThreadStatus::Dead)
+        return static_cast<std::int32_t>(kErrorUnknownUid);
+    if (it->second.status == ThreadStatus::Waiting &&
+        it->second.wait_kind == P3PThread::WaitKind::ThreadSleep) {
+        it->second.wait_kind = P3PThread::WaitKind::None;
+        it->second.timed_wait = false;
+        it->second.status = ThreadStatus::Ready;
+    } else {
+        ++it->second.wakeup_count;
+    }
+    return 0;
+}
+
 void P3PKernel::note_wait_event_flag(std::int32_t evf_uid, std::uint32_t pattern,
                                      std::uint32_t mode) {
     const auto it = threads_.find(current_uid_);
@@ -845,6 +873,41 @@ bool P3PKernel::unregister_module(std::int32_t uid) {
     if (block_uid > 0)
         free_partition_memory(block_uid);
     return true;
+}
+
+void P3PKernel::dump_thread_states(std::FILE *out) const {
+    static const char *kStatus[] = {"Dormant", "Ready", "Running", "Dead", "Deleted", "Waiting"};
+    std::fprintf(out, "[p3p] thread dump (%zu threads, now=%llu us):\n", threads_.size(),
+                 static_cast<unsigned long long>(now_us_));
+    for (const auto &[uid, t] : threads_) {
+        std::fprintf(out, "  uid %d '%s' prio %d %s pc %08X", uid, t.name.c_str(), t.priority,
+                     kStatus[static_cast<std::size_t>(t.status)], t.context.pc);
+        if (t.status == ThreadStatus::Waiting) {
+            switch (t.wait_kind) {
+                case P3PThread::WaitKind::EventFlag:
+                    std::fprintf(out, " wait=evf %d pattern %08X mode %08X", t.wait_evf_uid,
+                                 t.wait_pattern, t.wait_mode);
+                    break;
+                case P3PThread::WaitKind::Mutex:
+                    std::fprintf(out, " wait=mutex %d count %d", t.wait_mutex_uid,
+                                 t.wait_mutex_count);
+                    break;
+                case P3PThread::WaitKind::Sleep:
+                    std::fprintf(out, " wait=sleep");
+                    break;
+                case P3PThread::WaitKind::ThreadSleep:
+                    std::fprintf(out, " wait=sleepthread wakeups %d", t.wakeup_count);
+                    break;
+                default:
+                    std::fprintf(out, " wait=other");
+                    break;
+            }
+            if (t.timed_wait)
+                std::fprintf(out, " timed wake_at %llu",
+                             static_cast<unsigned long long>(t.wake_at_us));
+        }
+        std::fprintf(out, "\n");
+    }
 }
 
 }  // namespace p3p

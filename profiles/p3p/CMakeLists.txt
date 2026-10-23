@@ -53,6 +53,8 @@ add_library(p3p_hle STATIC
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_umd.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_services.cpp"
     "${P3P_PROFILE_DIR}/host/gpu/p3p_ge_executor.cpp"
+    "${P3P_PROFILE_DIR}/host/gpu/p3p_rasterizer.cpp"
+    "${P3P_PROFILE_DIR}/host/gpu/p3p_frame_dump.cpp"
 )
 target_include_directories(p3p_hle PUBLIC
     "${P3P_PROFILE_DIR}/host"
@@ -136,4 +138,14 @@ if(PSPRECOMP_BUILD_PROFILE_TESTS)
     )
     target_link_libraries(test_p3p_modules PRIVATE p3p_kernel p3p_hle psprecomp_core)
     add_test(NAME test_p3p_modules COMMAND test_p3p_modules)
+
+    add_executable(test_p3p_rasterizer
+        "${P3P_PROFILE_DIR}/tests/test_p3p_rasterizer.cpp"
+    )
+    target_include_directories(test_p3p_rasterizer PRIVATE
+        "${P3P_PROFILE_DIR}/host"
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_link_libraries(test_p3p_rasterizer PRIVATE p3p_kernel p3p_hle psprecomp_core)
+    add_test(NAME test_p3p_rasterizer COMMAND test_p3p_rasterizer)
 endif()

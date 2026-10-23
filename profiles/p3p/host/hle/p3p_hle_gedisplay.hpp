@@ -13,6 +13,7 @@
 
 namespace psprecomp {
 class Runtime;
+class GuestMemory;
 struct AllegrexContext;
 }  // namespace psprecomp
 
@@ -24,6 +25,12 @@ inline constexpr const char *kDisplayLibrary = "sceDisplay";
 class P3PKernel;
 
 void gedisplay_reset_state();
+
+// Gate 6 WP2: dumps the current display framebuffer as a PNG.
+bool gedisplay_dump_frame(psprecomp::GuestMemory &memory, const std::string &path);
+
+// Registers a path for periodic mid-run dumps (every 240 vblanks).
+void gedisplay_set_frame_dump_path(const std::string &path);
 
 // Returns true when the NID was handled (result in $v0 / $f0). `kernel`
 // may be null (trace runner). With a kernel, vblank waits are scheduling

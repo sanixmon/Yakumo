@@ -1,6 +1,8 @@
 #include "hle/p3p_hle_gedisplay.hpp"
 
+#include "gpu/p3p_frame_dump.hpp"
 #include "gpu/p3p_ge_executor.hpp"
+#include "gpu/p3p_rasterizer.hpp"
 #include "kernel/p3p_kernel.hpp"
 
 #include <map>
@@ -44,6 +46,7 @@ struct GeListRecord {
     ge::GeRunStatus status = ge::GeRunStatus::Done;
     std::vector<ge::GeDrawCall> draws;
     ge::GeExecStats stats;
+    std::size_t rasterized = 0;  // draws already fed to the rasterizer
 };
 
 struct GeDisplayState {
@@ -55,6 +58,12 @@ struct GeDisplayState {
     std::uint32_t ge_signal_cb = 0;
     std::uint32_t ge_finish_cb = 0;
     std::uint32_t ge_log_budget = 12;
+    ge::RasterStats raster_stats;
+    // --dump-frame: when set, the display framebuffer is written to
+    // this path every kDumpEveryFrames vblanks (the guest's frame loop
+    // is the only reliable mid-run cadence in a headless boot).
+    std::string dump_path;
+    std::uint32_t dump_counter = 0;
     std::uint32_t vcount = 0;
     std::uint32_t mode = 0;
     std::uint32_t width = 480;
@@ -69,6 +78,16 @@ GeDisplayState g_state;
 }  // namespace
 
 void gedisplay_reset_state() { g_state = GeDisplayState{}; }
+
+void gedisplay_set_frame_dump_path(const std::string &path) { g_state.dump_path = path; }
+
+bool gedisplay_dump_frame(psprecomp::GuestMemory &memory, const std::string &path) {
+    const std::uint32_t height = g_state.height != 0 ? g_state.height : 272u;
+    const std::uint32_t width =
+        std::min(g_state.fb_bufferwidth, g_state.width != 0 ? g_state.width : 480u);
+    return write_framebuffer_png(memory, g_state.fb_topaddr, g_state.fb_bufferwidth, width,
+                                 height, g_state.fb_pixelformat, path);
+}
 
 namespace {
 
@@ -108,6 +127,17 @@ void ge_run_list(psprecomp::GuestMemory &memory, P3PKernel *kernel, std::uint32_
     ge_accumulate(rec.stats, stats);
     rec.status = res.status;
     rec.pc = res.pc;
+    // Gate 6 WP2: rasterize whatever this run produced.
+    const std::uint32_t pixels_before = g_state.raster_stats.pixels_written;
+    ge::rasterize_draws(memory, rec.draws, rec.rasterized, g_state.fb_pixelformat,
+                        g_state.height, g_state.raster_stats);
+    rec.rasterized = rec.draws.size();
+    const std::uint32_t pixels_new = g_state.raster_stats.pixels_written - pixels_before;
+    if (pixels_new > 0u && g_state.ge_log_budget > 0u)
+        std::fprintf(stderr,
+                     "[p3p-ge] rasterized +%u px (totals: %u sprites, %u tris, %u px)\n",
+                     pixels_new, g_state.raster_stats.sprites, g_state.raster_stats.triangles,
+                     g_state.raster_stats.pixels_written);
     if (res.status == ge::GeRunStatus::Done && stats.finishes > 0u && kernel != nullptr &&
         g_state.ge_finish_cb != 0u)
         kernel->notify_callback(static_cast<std::int32_t>(g_state.ge_finish_cb),
@@ -250,6 +280,9 @@ bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexCont
             case kNidDisplayWaitVblankStartCB:
                 g_state.vcount += 1u;
                 wait_vblank(ctx, kernel);
+                if (!g_state.dump_path.empty() &&
+                    ++g_state.dump_counter % 240u == 0u)
+                    gedisplay_dump_frame(memory, g_state.dump_path);
                 return true;
             case kNidDisplayWaitVblankStartMultiCB:
                 g_state.vcount += ctx.gpr[4] != 0u ? ctx.gpr[4] : 1u;
