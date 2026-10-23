@@ -32,3 +32,50 @@ if(P3P_GENERATED)
 else()
     message(STATUS "p3p: no generated AOT units; run psp_recomp --auto first")
 endif()
+
+# Kernel + ThreadMan HLE (Gate 4B scope).
+add_library(p3p_kernel STATIC
+    "${P3P_PROFILE_DIR}/host/kernel/p3p_kernel.cpp"
+)
+target_include_directories(p3p_kernel PUBLIC
+    "${P3P_PROFILE_DIR}/host"
+    "${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(p3p_kernel PUBLIC psprecomp_core)
+
+add_library(p3p_hle STATIC
+    "${P3P_PROFILE_DIR}/host/hle/p3p_hle_threadman.cpp"
+)
+target_include_directories(p3p_hle PUBLIC
+    "${P3P_PROFILE_DIR}/host"
+    "${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(p3p_hle PUBLIC p3p_kernel psprecomp_core)
+
+target_link_libraries(p3p_host_stub PUBLIC p3p_hle p3p_kernel)
+
+# AOT executable host (links the generated corpus when present).
+add_executable(p3p
+    "${P3P_PROFILE_DIR}/host/main.cpp"
+)
+target_include_directories(p3p PRIVATE
+    "${P3P_PROFILE_DIR}/host"
+    "${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(p3p PRIVATE p3p_host_stub p3p_kernel p3p_hle psprecomp_core)
+if(P3P_GENERATED)
+    target_link_libraries(p3p PRIVATE p3p_generated)
+    target_compile_definitions(p3p PRIVATE P3P_HAS_GENERATED=1)
+endif()
+
+if(PSPRECOMP_BUILD_PROFILE_TESTS)
+    add_executable(test_p3p_threading
+        "${P3P_PROFILE_DIR}/tests/test_p3p_threading.cpp"
+    )
+    target_include_directories(test_p3p_threading PRIVATE
+        "${P3P_PROFILE_DIR}/host"
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_link_libraries(test_p3p_threading PRIVATE p3p_kernel p3p_hle psprecomp_core)
+    add_test(NAME test_p3p_threading COMMAND test_p3p_threading)
+endif()
