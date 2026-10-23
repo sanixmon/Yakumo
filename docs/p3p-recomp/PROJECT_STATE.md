@@ -20,14 +20,11 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 ## 2. Current Verified Repository State
 
 - **Repository Root**: `/home/ubuntu/recompile/yakumo_repo`
-- **Active Git Branch**: `main`
+- **Active Git Branch**: `feature/p3p-recomp` (fork: `sanixmon/Yakumo`)
 - **Upstream HEAD Commit**: `5bacba315b5b151856adc80cd22b57ef6cf04308` (Merge pull request #341 from TeamGDB/sound-settings)
-- **Local Working-Tree Status**:
-  - `modified: .gitignore` (added `/profiles/p3p/generated/`)
-  - `modified: src/interpreter.cpp` (Oracle trace hook added in Gate 3, non-intrusive, gated by `YAKUMO_ORACLE_TRACE`)
-  - `untracked: profiles/p3p/` (scaffolded profile: `host/`, `config/`, `scripts/`, `tools/`, `packaging/`)
-  - `untracked: tools/trace/trace_diff.py` (validated streaming JSONL diff tool)
-  - `untracked: docs/p3p-recomp/` (project truth system)
+- **Local Working-Tree Status**: Clean — all P3P work committed on `feature/p3p-recomp` and pushed to the fork (`sanixmon/Yakumo`).
+- **AOT Corpus (2026-10-23)**: Codegen complete — `profiles/p3p/generated/` (gitignored): 224 units + registry, 14,787 functions, 706,236 instructions, 221 import wrappers. Corpus compiles 225/225 objects with 0 errors via target `p3p_generated` in build tree `out/p3p-build` (Ninja, `PSPRECOMP_PROFILE=p3p`, `PSPRECOMP_GENERATED_JOBS=1`). The old `out/p3p` tree is STALE (its source path `/tmp/recomp_workspace` no longer exists) — do not use it.
+- **Host Wiring Plan (2026-10-23)**: `docs/p3p-recomp/HOST_WIRING_PLAN.md`.
 
 ---
 
@@ -36,6 +33,7 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 - **Latest Completed Gate**: **Gate 4A-R3 (Final Contract & Memory Verification)** — `VERDICT: PASS`
 - **Current Gate Status**: **Gate 4B (HLE Threading Implementation) — READY FOR AUTHORIZATION**
 - **Blockers to Gate 4B Entry**: **NONE (0 Remaining Blockers)**. All mathematical bounds, stack formulas, `$ra` contracts, failure atomicity matrices, and memory allocators have been verified against source code and traces.
+- **2026-10-23 Update**: AOT corpus generated and compiled clean (225/225 objects; see §2 and §5). Executable host wiring plan prepared (`docs/p3p-recomp/HOST_WIRING_PLAN.md`). Gate 4B implementation still requires explicit user authorization.
 - **Authorized Scope for Next Step (Gate 4B)**:
   1. Implement `p3p_kernel.hpp` & `.cpp` in `profiles/p3p/host/kernel/` (RangeAllocator + Thread Context Lifecycle).
   2. Implement `p3p_hle_threadman.cpp` in `profiles/p3p/host/hle/` (`sceKernelCreateThread` & `sceKernelStartThread` stubs).
@@ -73,6 +71,8 @@ Before resuming or modifying any code, verify existence of:
 - [x] Oracle Diff Tool: `/home/ubuntu/recompile/yakumo_repo/tools/trace/trace_diff.py`
 - [x] Reference Trace: `/home/ubuntu/recompile/traces/ppsspp_p3p_trace.jsonl` and `/home/ubuntu/recompile/traces/ppsspp_p3p_calls.jsonl`
 - [x] Analysis Data: `/home/ubuntu/recompile/p3p_analysis/p3p_report.json`
+- [x] Generated AOT Corpus: `/home/ubuntu/recompile/yakumo_repo/profiles/p3p/generated/` (224 units + registry; gitignored, regenerable)
+- [x] Corpus Build Tree: `/home/ubuntu/recompile/yakumo_repo/out/p3p-build/` (225/225 objects; `out/p3p` is stale — do not use)
 
 ---
 
