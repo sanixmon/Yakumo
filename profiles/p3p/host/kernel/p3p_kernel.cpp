@@ -790,11 +790,61 @@ std::int32_t P3PKernel::register_main_module(std::uint32_t base, std::uint32_t s
 }
 
 std::int32_t P3PKernel::module_uid_at(std::uint32_t address) const {
-    if (main_module_uid_ == 0)
-        return 0;
-    if (address >= main_module_base_ && address - main_module_base_ < main_module_size_)
+    if (main_module_uid_ != 0 && address >= main_module_base_ &&
+        address - main_module_base_ < main_module_size_)
         return main_module_uid_;
+    for (const auto &[uid, module] : modules_) {
+        if (address >= module.base && address - module.base < module.size)
+            return uid;
+    }
     return 0;
+}
+
+std::int32_t P3PKernel::register_module(const std::string &name, std::uint32_t base,
+                                        std::uint32_t size, std::uint32_t gp,
+                                        std::uint32_t start_entry, std::int32_t block_uid) {
+    ModuleRecord rec;
+    rec.name = name;
+    rec.base = base;
+    rec.size = size;
+    rec.gp = gp;
+    rec.start_entry = start_entry;
+    rec.block_uid = block_uid;
+    const std::int32_t uid = next_uid_++;
+    modules_.emplace(uid, std::move(rec));
+    return uid;
+}
+
+const P3PKernel::ModuleRecord *P3PKernel::find_module(std::int32_t uid) const {
+    const auto it = modules_.find(uid);
+    return it != modules_.end() ? &it->second : nullptr;
+}
+
+std::int32_t P3PKernel::find_module_by_name(const std::string &name) const {
+    for (const auto &[uid, module] : modules_) {
+        if (module.name == name)
+            return uid;
+    }
+    return 0;
+}
+
+bool P3PKernel::set_module_started(std::int32_t uid, bool started) {
+    const auto it = modules_.find(uid);
+    if (it == modules_.end())
+        return false;
+    it->second.started = started;
+    return true;
+}
+
+bool P3PKernel::unregister_module(std::int32_t uid) {
+    const auto it = modules_.find(uid);
+    if (it == modules_.end())
+        return false;
+    const std::int32_t block_uid = it->second.block_uid;
+    modules_.erase(it);
+    if (block_uid > 0)
+        free_partition_memory(block_uid);
+    return true;
 }
 
 }  // namespace p3p

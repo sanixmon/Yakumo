@@ -389,3 +389,67 @@ image, kernel module registry so GetModuleIdByAddress/GetModuleId
 answer for it, StartModule semantics; PRX code execution strategy —
 recompiled corpus extension vs interpreter — decided from what the
 game actually calls).
+
+
+---
+
+## Gate 5D — Real PRX Module Loading (2026-10-23)
+
+Plan: `GATE5D_PLAN.md` (authorized 2026-10-23; discovered during
+Gate 6 WP1 verification). The boot was spinning in a
+LoadModule/StartModule/UnloadModule loop on
+`USRDIR/module/libsuppreacc.prx` because ModuleMgr was the Gate 5-era
+fake.
+
+### What was built
+
+- **Kernel module registry** (`p3p_kernel`): uid → {name, base, size,
+  gp, module_start, started, partition block}; `module_uid_at`
+  answers for loaded modules as well as the main module; unregister
+  frees the image block.
+- **PRX loader** (`host/kernel/p3p_module_loader`): parses
+  ET_SCE_RELEXE files, allocates one partition block for the image
+  span, zeroes + copies PT_LOAD segments (bss included), and applies
+  SHT_PRXREL relocations — R_MIPS_32, R_MIPS_26, and HI16/LO16 pairs
+  (the LO16 computes the combined addend and patches all pending
+  HI16s); other types are counted, not applied. Module info comes
+  from `.rodata.sceModuleInfo`; `module_start` is recovered from the
+  syslib export using the real table layout (16-byte entries
+  {name, version, attribute, size(words), varCount, funcCount,
+  resident}; resident table = [func nids][var nids][func addrs]
+  [var addrs] — PPSSPP `sceKernelModule.cpp`). A module may
+  legitimately have no module_start: libsuppreacc's syslib exports
+  zero functions (two variables: module info + SDK version).
+- **ModuleMgr HLE**: LoadModule reads the file via
+  `Runtime::translate_path` and loads for real (re-loading a live
+  name returns the existing uid); StartModule marks started and
+  **returns the module uid**; Stop/Unload/GetModuleId complete the
+  lifecycle; unknown uids → SCE_KERNEL_ERROR_UNKNOWN_MODULE
+  (0x8002012E). PRX code is not executed (the gate's explicit
+  non-goal).
+
+### The decisive detail
+
+The game wrapper (generated unit 0, guest ~0x08807E60) treats
+StartModule's return as: v0 > 0 = success, otherwise unload + retry.
+PPSSPP's `__KernelStartModule` always returns positive (the start
+thread's id, or the module id when there is no entry to run).
+Returning 0 from the headless model cost ~1.8M fake loads before
+this gate and ~18K real ones during it — the loader itself was never
+the problem.
+
+### Verification
+
+- `test_p3p_modules`: **20 checks, 0 failures** (synthetic PRX:
+  placement, bss, relocation math, registry lifecycle, truncated
+  input). An early version of the fixture shared the loader's wrong
+  24-byte export-entry assumption and passed vacuously; both were
+  corrected against PPSSPP's layout and the real PRX.
+- Regressions: services 65/65, ge 19/19, yield 83/83,
+  threading 128/128, io 44/44, `verify_boot.sh` **OK**.
+- Boot: `libsuppreacc.prx` loads once ('scesupPreAcc_library'
+  @0x09EC1000, 410 relocations applied, 0 skipped) and starts once.
+  The game then calls the module's library (`scesupPreAcc::0x86DEBD66`),
+  spawns 'sas thread' + 'SDK WRAP', and begins sceSasCore
+  initialization (Gate 7 territory), settling into its thread
+  rotation. The road to Gate 6 WP2 (draws/frame dump) is open.

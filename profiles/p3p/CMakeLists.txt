@@ -36,6 +36,7 @@ endif()
 # Kernel + ThreadMan HLE (Gate 4B scope).
 add_library(p3p_kernel STATIC
     "${P3P_PROFILE_DIR}/host/kernel/p3p_kernel.cpp"
+    "${P3P_PROFILE_DIR}/host/kernel/p3p_module_loader.cpp"
 )
 target_include_directories(p3p_kernel PUBLIC
     "${P3P_PROFILE_DIR}/host"
@@ -125,4 +126,14 @@ if(PSPRECOMP_BUILD_PROFILE_TESTS)
     )
     target_link_libraries(test_p3p_ge PRIVATE p3p_kernel p3p_hle psprecomp_core)
     add_test(NAME test_p3p_ge COMMAND test_p3p_ge)
+
+    add_executable(test_p3p_modules
+        "${P3P_PROFILE_DIR}/tests/test_p3p_modules.cpp"
+    )
+    target_include_directories(test_p3p_modules PRIVATE
+        "${P3P_PROFILE_DIR}/host"
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_link_libraries(test_p3p_modules PRIVATE p3p_kernel p3p_hle psprecomp_core)
+    add_test(NAME test_p3p_modules COMMAND test_p3p_modules)
 endif()

@@ -1,6 +1,11 @@
 #include "hle/p3p_hle_services.hpp"
 
 #include "kernel/p3p_kernel.hpp"
+#include "kernel/p3p_module_loader.hpp"
+
+#include <cstdio>
+#include <filesystem>
+#include <vector>
 #include "psprecomp/common.hpp"
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/runtime.hpp"
@@ -128,10 +133,7 @@ bool hle_services_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexConte
             set_v0(uid != 0 ? static_cast<std::uint32_t>(uid) : kErrorNotFoundUidFunc);
             return true;
         }
-        if (nid == 0x977DE386u) {  // sceKernelLoadModule (stopgap)
-            // Real PRX loading is a later gate; log the request and hand
-            // back a plausible module UID so boot can be observed past
-            // this point.
+        if (nid == 0x977DE386u) {  // sceKernelLoadModule (Gate 5D: real)
             std::string path;
             for (std::uint32_t i = 0; i < 128u && memory.contains(ctx.gpr[4] + i, 1u); ++i) {
                 const char c = static_cast<char>(memory.load8(ctx.gpr[4] + i));
@@ -139,20 +141,95 @@ bool hle_services_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexConte
                     break;
                 path += c;
             }
-            static std::int32_t next_fake_module_uid = 9001;
-            const std::int32_t uid = next_fake_module_uid++;
-            std::fprintf(stderr, "[p3p] load module '%s' -> fake uid %d (NOT loaded)\n",
-                         path.c_str(), uid);
+            if (kernel == nullptr) {
+                set_v0(kErrorUnknownModule);
+                return true;
+            }
+            std::vector<std::uint8_t> bytes;
+            const std::filesystem::path host_path = runtime.translate_path(path);
+            if (!host_path.empty()) {
+                if (FILE *file = std::fopen(host_path.string().c_str(), "rb")) {
+                    std::fseek(file, 0, SEEK_END);
+                    const long size = std::ftell(file);
+                    std::fseek(file, 0, SEEK_SET);
+                    if (size > 0) {
+                        bytes.resize(static_cast<std::size_t>(size));
+                        if (std::fread(bytes.data(), 1u, bytes.size(), file) != bytes.size())
+                            bytes.clear();
+                    }
+                    std::fclose(file);
+                }
+            }
+            if (bytes.empty()) {
+                std::fprintf(stderr, "[p3p] load module '%s': file not readable\n", path.c_str());
+                set_v0(kErrorUnknownModule);
+                return true;
+            }
+            const PrxLoadResult res = load_prx_module(memory, *kernel, bytes);
+            if (!res.ok) {
+                std::fprintf(stderr, "[p3p] load module '%s' failed: %s\n", path.c_str(),
+                             res.error.c_str());
+                set_v0(kErrorUnknownModule);
+                return true;
+            }
+            // Loading an already-loaded module again returns its uid
+            // (the freshly placed copy is dropped).
+            if (const std::int32_t existing = kernel->find_module_by_name(res.name);
+                existing != 0 && existing != res.uid) {
+                kernel->unregister_module(res.uid);
+                std::fprintf(stderr, "[p3p] load module '%s': '%s' already loaded as uid %d\n",
+                             path.c_str(), res.name.c_str(), existing);
+                set_v0(static_cast<std::uint32_t>(existing));
+                return true;
+            }
+            std::fprintf(stderr,
+                         "[p3p] load module '%s' -> '%s' uid %d @%08X size %u gp %08X "
+                         "module_start %08X relocs %u applied, %u skipped\n",
+                         path.c_str(), res.name.c_str(), res.uid, res.base, res.size, res.gp,
+                         res.module_start, res.relocations_applied, res.relocations_skipped);
+            set_v0(static_cast<std::uint32_t>(res.uid));
+            return true;
+        }
+        if (nid == 0x50F0C1ECu) {  // sceKernelStartModule
+            const std::int32_t uid = static_cast<std::int32_t>(ctx.gpr[4]);
+            const P3PKernel::ModuleRecord *rec =
+                kernel != nullptr ? kernel->find_module(uid) : nullptr;
+            if (rec == nullptr) {
+                set_v0(kErrorUnknownModule);
+                return true;
+            }
+            kernel->set_module_started(uid, true);
+            std::fprintf(stderr,
+                         "[p3p] start module '%s' uid %d (module_start %08X NOT executed "
+                         "yet -- Gate 5D scope)\n",
+                         rec->name.c_str(), uid, rec->start_entry);
+            // sceKernelStartModule returns a POSITIVE value on success:
+            // the start thread's id, or the module id itself when the
+            // module has no entry to run (PPSSPP __KernelStartModule).
+            // The game checks v0 > 0 and unloads + retries otherwise --
+            // returning 0 here was the libsuppreacc retry loop.
             set_v0(static_cast<std::uint32_t>(uid));
             return true;
         }
-        if (nid == 0x50F0C1ECu) {  // sceKernelStartModule (stopgap, pairs with above)
-            std::fprintf(stderr, "[p3p] start module uid %d (fake, NOT started)\n",
-                         static_cast<std::int32_t>(ctx.gpr[4]));
-            set_v0(0u);
+        if (nid == 0xD1FF982Au) {  // sceKernelStopModule
+            const std::int32_t uid = static_cast<std::int32_t>(ctx.gpr[4]);
+            set_v0(kernel != nullptr && kernel->set_module_started(uid, false)
+                       ? 0u
+                       : kErrorUnknownModule);
             return true;
         }
-        return false;  // other ModuleMgr calls stay stubs (later gate)
+        if (nid == 0x2E0911AAu) {  // sceKernelUnloadModule
+            const std::int32_t uid = static_cast<std::int32_t>(ctx.gpr[4]);
+            set_v0(kernel != nullptr && kernel->unregister_module(uid) ? 0u
+                                                                       : kErrorUnknownModule);
+            return true;
+        }
+        if (nid == 0xF0A26395u) {  // sceKernelGetModuleId (the caller's module)
+            const std::int32_t uid = kernel != nullptr ? kernel->main_module_uid() : 0;
+            set_v0(uid != 0 ? static_cast<std::uint32_t>(uid) : kErrorUnknownModule);
+            return true;
+        }
+        return false;  // StopUnloadSelfModuleWithStatus stays a stub
     }
 
     if (library == "Kernel_Library") {

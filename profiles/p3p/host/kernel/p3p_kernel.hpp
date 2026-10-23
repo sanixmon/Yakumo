@@ -34,6 +34,7 @@ inline constexpr std::uint32_t kErrorIllegalArgument = 0x800200D2u;  // SCE_KERN
 inline constexpr std::uint32_t kErrorUnknownEvfId = 0x8002019Au;     // SCE_KERNEL_ERROR_UNKNOWN_EVFID
 inline constexpr std::uint32_t kErrorEvfCond = 0x800201AFu;          // SCE_KERNEL_ERROR_EVF_COND
 inline constexpr std::uint32_t kErrorUnknownObject = 0x800200CBu;  // SCE_KERNEL_ERROR_UNKNOWN_UID (object pools)
+inline constexpr std::uint32_t kErrorUnknownModule = 0x8002012Eu;   // SCE_KERNEL_ERROR_UNKNOWN_MODULE
 inline constexpr std::uint32_t kErrorIllegalAttr = 0x80020191u;       // SCE_KERNEL_ERROR_ILLEGAL_ATTR
 inline constexpr std::uint32_t kErrorWaitTimeout = 0x800201A8u;       // SCE_KERNEL_ERROR_WAIT_TIMEOUT
 inline constexpr std::uint32_t kErrorIllegalCount = 0x800201BDu;      // SCE_KERNEL_ERROR_ILLEGAL_COUNT
@@ -289,6 +290,26 @@ public:
     // (idempotent). Backs ModuleMgrForUser::sceKernelGetModuleIdByAddress.
     std::int32_t register_main_module(std::uint32_t base, std::uint32_t size);
     [[nodiscard]] std::int32_t module_uid_at(std::uint32_t address) const;
+    [[nodiscard]] std::int32_t main_module_uid() const noexcept { return main_module_uid_; }
+
+    // --- Gate 5D: runtime-loaded modules (sceKernelLoadModule) -----------
+    struct ModuleRecord {
+        std::string name;
+        std::uint32_t base = 0;
+        std::uint32_t size = 0;
+        std::uint32_t gp = 0;
+        std::uint32_t start_entry = 0;  // module_start, absolute (0 = none)
+        bool started = false;
+        std::int32_t block_uid = 0;  // partition block holding the image
+    };
+    std::int32_t register_module(const std::string &name, std::uint32_t base, std::uint32_t size,
+                                 std::uint32_t gp, std::uint32_t start_entry,
+                                 std::int32_t block_uid);
+    [[nodiscard]] const ModuleRecord *find_module(std::int32_t uid) const;
+    [[nodiscard]] std::int32_t find_module_by_name(const std::string &name) const;
+    bool set_module_started(std::int32_t uid, bool started);
+    // Removes the record and frees its partition block. False if unknown.
+    bool unregister_module(std::int32_t uid);
 
 private:
     P3PThread *pick_ready_excluding(std::int32_t excluded_uid);
@@ -335,6 +356,7 @@ private:
     std::map<std::int32_t, Callback> callbacks_;
     std::map<std::int32_t, EventFlag> event_flags_;
     std::map<std::int32_t, Mutex> mutexes_;
+    std::map<std::int32_t, ModuleRecord> modules_;
     std::int32_t main_module_uid_ = 0;
     std::uint32_t main_module_base_ = 0;
     std::uint32_t main_module_size_ = 0;
