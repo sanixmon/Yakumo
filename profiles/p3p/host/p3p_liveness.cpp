@@ -106,6 +106,13 @@ void evaluate_window(std::uint64_t dispatch) {
                          static_cast<unsigned long long>(d_auv),
                          static_cast<unsigned long long>(d_aua), d_px,
                          static_cast<unsigned long long>(d_clk));
+            if (g_window.new_syscalls == 0u && d_put == 0u && d_auv == 0u &&
+                d_aua == 0u && d_px == 0u && d_clk > 1'000'000u) {
+                std::fprintf(stderr, "[p3p-liveness]   stalled pc set:");
+                for (std::uint32_t pc : g_window.pcs)
+                    std::fprintf(stderr, " %08X", pc);
+                std::fprintf(stderr, "\n");
+            }
         }
     }
     g_window.reset(dispatch);
