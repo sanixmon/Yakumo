@@ -1,5 +1,6 @@
 #include "p3p_profile.hpp"
 
+#include "hle/p3p_hle_io.hpp"
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/common.hpp"
@@ -25,11 +26,14 @@ bool stub_seen(const std::string &library, std::uint32_t nid) {
     return !seen.emplace(library, nid).second;
 }
 
-// Shared import behaviour for both dispatch forms: performs the ThreadMan
-// implementation when a kernel is attached, otherwise acts as a logged
-// return-0 stub. Writes the result to $v0; does not touch $pc.
+// Shared import behaviour for both dispatch forms: performs the IoFileMgr
+// implementation (Gate 5) and the ThreadMan implementation when a kernel is
+// attached, otherwise acts as a logged return-0 stub. Writes the result to
+// $v0; does not touch $pc.
 void dispatch_import(P3PKernel *kernel, const std::string &library, std::uint32_t nid,
                      psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    if (library == kIoFileMgrLibrary && hle_io_dispatch(runtime, ctx, nid))
+        return;
     if (kernel != nullptr && library == kThreadManLibrary && nid == kNidCreateThread) {
         hle_create_thread(runtime, ctx, *kernel);
         return;

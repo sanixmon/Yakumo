@@ -29,18 +29,21 @@ void register_generated_functions(Runtime &runtime);
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: p3p <ELF> [--max-dispatches N] [--interpret]\n");
+        std::fprintf(stderr, "Usage: p3p <ELF> [--max-dispatches N] [--interpret] [--game-root DIR]\n");
         return 1;
     }
     const std::filesystem::path elf_path = argv[1];
     std::uint64_t max_dispatches = 10'000'000u;
     bool interpret = false;
+    std::filesystem::path game_root;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--max-dispatches" && i + 1 < argc)
             max_dispatches = std::stoull(argv[++i]);
         else if (arg == "--interpret")
             interpret = true;
+        else if (arg == "--game-root" && i + 1 < argc)
+            game_root = argv[++i];
     }
 
     try {
@@ -52,6 +55,11 @@ int main(int argc, char **argv) {
         const auto relocations = elf.load_and_relocate(runtime.memory(), load_base);
         std::fprintf(stderr, "[p3p] relocated %u entries to load base %s\n", relocations.total,
                      psprecomp::hex32(load_base).c_str());
+
+        if (!game_root.empty()) {
+            runtime.set_game_root(game_root);
+            std::fprintf(stderr, "[p3p] game root: %s\n", game_root.string().c_str());
+        }
 
         bool aot = !interpret;
 #ifdef P3P_HAS_GENERATED
