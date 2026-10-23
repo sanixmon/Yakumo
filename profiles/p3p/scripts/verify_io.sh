@@ -33,6 +33,6 @@ set -e
 echo "-- first file opens --"
 grep "\[p3p-io\] open" "${LOG}" | head -20 || true
 echo "-- stop reason --"
-grep "\[p3p\] stopped:" "${LOG}" || tail -3 "${LOG}"
+grep -E "\[p3p\] (stopped:|error:)" "${LOG}" || tail -3 "${LOG}"
 grep "\[p3p\] kernel:" "${LOG}" || true
 echo "full boot log: ${LOG}"

@@ -15,7 +15,7 @@ This document tracks authorization, entry criteria, exit criteria, and status fo
 | **Gate 3A** | Trace Semantic Alignment | **PASS** | User | None (Divergence proven at Call #3 UID return) |
 | **Gate 4A** | Minimal Threading Specification (R1-R3) | **PASS / AUDIT COMPLETE** | User | None (All 4 blockers mathematically resolved) |
 | **Gate 4B** | Threading HLE Implementation | **PASS** | User (2026-10-23) | None |
-| **Gate 5** | Headless CPK Mount & File I/O | **NOT STARTED** | — | Prerequisite: Gate 4B PASS |
+| **Gate 5** | Headless CPK Mount & File I/O | **IMPLEMENTED (boot exit blocked upstream)** | — | Prerequisite: Gate 4B PASS. IoFileMgr implemented + unit-verified 44/44 (2026-10-23); boot reaches no I/O call yet — stopped earlier by return-0 stubs for SysMem/Ge/Display services; see EVIDENCE Gate 5 section |
 | **Gate 6** | 2D Graphics Engine to Vulkan | **NOT STARTED** | — | Prerequisite: Gate 5 PASS |
 | **Gate 7** | Audio Synthesis (CRI / SAS) | **NOT STARTED** | — | Prerequisite: Gate 6 PASS |
 | **Gate 8** | 3D Tartarus & Battle Logic | **NOT STARTED** | — | Prerequisite: Gate 7 PASS |

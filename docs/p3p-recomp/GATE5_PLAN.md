@@ -1,6 +1,6 @@
 # GATE5_PLAN.md — Gate 5 Plan: Headless CPK Mount & File I/O (P3P)
 
-> **Status**: PREPARED 2026-10-23 at the user's request. Planning document only — implementation requires the user's explicit authorization **and** the game media (see §2).
+> **Status**: EXECUTED 2026-10-23 (WP0–WP2 + WP4; WP3 superseded by evidence). Implementation complete and unit-verified; boot exit blocked by pre-I/O services — see EVIDENCE.md Gate 5 section. Note: §2/§5's `sceKernelLoadModule` label for NID `0xD8B73127` was wrong; it is `sceKernelGetModuleIdByAddress` (PPSSPP table), and no LoadModule call occurs on the boot path.
 > **Prerequisites read**: `PROJECT_STATE.md`, `GATES.md`, `ROADMAP.md`, `DECISIONS.md`, `ARCHITECTURE.md`, `HOST_WIRING_PLAN.md`, Gate 4B evidence.
 
 ---

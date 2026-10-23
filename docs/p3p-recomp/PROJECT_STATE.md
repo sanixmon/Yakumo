@@ -31,10 +31,10 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 ## 3. Current Gate & Milestone Status
 
 - **Latest Completed Gate**: **Gate 4B (Threading HLE Implementation)** — `VERDICT: PASS` (2026-10-23)
-- **Current Gate Status**: **Gate 5 (Headless CPK Mount & File I/O) — READY FOR AUTHORIZATION**
+- **Current Gate Status**: **Gate 5 (Headless CPK Mount & File I/O) — IMPLEMENTED 2026-10-23; boot exit blocked by pre-I/O services (see EVIDENCE)**
 - **Gate 4B Results (2026-10-23)**: AOT executable host `p3p` boots the ELF; `p3p_kernel` (RangeAllocator + thread lifecycle) and `p3p_hle_threadman` (Create/Start) implemented per the Gate 4A specification. Unit tests 128/128 pass. Oracle window `0x0880421C`–`0x08804260` matches PPSSPP (see EVIDENCE.md Gate 4B section; `profiles/p3p/scripts/verify_boot.sh` reproduces the full loop). Boot proceeds past Call #5 deep into game init and stops at a guest null dereference caused by a return-0 stub — Gate 5+ HLE territory, not a Gate 4B defect.
-- **Authorized Scope for Next Step (Gate 5)**: Per `GATES.md` / `ROADMAP.md` (virtual disc mount, `umd0.cpk` reading, `IoFileMgrForUser`). Requires explicit user authorization.
-- **Gate 5 Plan (2026-10-23)**: `docs/p3p-recomp/GATE5_PLAN.md` (prepared at the user's request). Hard blocker: the game media is not on the VPS — the user must place his own ULES-01523 ISO dump at `~/recompile/p3p_media/` (BYOG rule); extraction via 7z into `profiles/p3p/game/` (gitignored).
+- **Gate 5 Outcome (2026-10-23)**: Media supplied by the user and verified byte-identical to the analyzed dump (EBOOT.BIN sha256 match); IoFileMgrForUser fully implemented and unit-verified (44/44). Boot reaches no I/O call yet: it stops at the pre-I/O wall (guest null deref, `recomp_unit_0165`, `0x08A9B7D8`) behind return-0 stubs for early services (sceKernelAllocPartitionMemory, sceGeEdramGetAddr, sceDisplayGetFrameBuf, sceKernelCreateCallback/CreateEventFlag, sceKernelGetModuleIdByAddress).
+- **Recommended Next Step**: a minimal early-services gate (SysMem partition allocation over the kernel's RangeAllocator, Ge/Display state stubs with real return values, callback/event-flag UIDs) so init can advance to the first `sceIoOpen`, which Gate 5 has ready. Requires explicit user authorization.
 - **Explicitly Prohibited in Next Step**:
   - NO changes to `src/` or `include/psprecomp/`.
   - NO renderer or audio work before its gate.

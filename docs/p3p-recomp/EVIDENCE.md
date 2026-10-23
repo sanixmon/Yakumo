@@ -169,3 +169,35 @@ Dumped via `/home/ubuntu/recompile/yakumo_repo/out/framework/dump_function`:
 - 32 MiB RAM model: stack bases differ from the 64 MiB PPSSPP trace by design; every stack-relative offset matches.
 - User partition clamped to the RAM end `0x0A000000` (`0x113F000` bytes), not the `0x0A800000` end stated in ARCHITECTURE.md — that figure assumes the 64 MiB model. Flagged for a future documentation correction.
 - `sceKernelStartThread` does not immediately switch to a strictly higher-priority thread (PPSSPP does). The boot path is unaffected (equal priorities; switch happens at loader exit per ARCHITECTURE §5). Deferred beyond Gate 4B.
+
+## Gate 5 — IoFileMgr File I/O (2026-10-23)
+
+**Status: IMPLEMENTED and unit-verified.** Boot integration: the boot does not reach any IoFileMgr call yet — it stops at the same pre-I/O wall as Gate 4B (see "Boot evidence"). The plan's boot exit criterion ("first `sceIoOpen` served") is pending an earlier-services gate; this is not an I/O defect.
+
+### Media (verified 2026-10-23)
+
+- User-supplied dump `~/recompile/p3p_media/ULES-01523.iso` (1,321,893,888 bytes, kept outside git). PARAM.SFO DISC_ID = `ULES01523`.
+- EBOOT.BIN extracted from the ISO: sha256 `f2d4e66a3a373bde066921221e01bd217aa856ee78468a0185e237b66ddc0023` — byte-identical to the analyzed dump of PROJECT_STATE section 4. The media matches the recompiled corpus exactly.
+- Extracted with 7z into `profiles/p3p/game/` (gitignored): `PSP_GAME/USRDIR/` with `umd0.cpk` (553,718,280 B), `umd1.cpk` (338,630,752 B), `MEMST.CPK` (269,667,104 B), `module/{libccc,libfont,libsuppreacc}.prx`, `sound/`.
+
+### Implementation
+
+- `profiles/p3p/host/hle/p3p_hle_io.{hpp,cpp}`: all 20 IoFileMgrForUser NIDs (names fully resolved, incl. `0x71B19E77` = sceIoLseekAsync and `0xFF5940B6` = sceIoCloseAsync, per PPSSPP `Core/HLE/sceIo.cpp`). Registered through a dispatch branch in `p3p_profile.cpp`; `main.cpp` gained `--game-root` (`Runtime::set_game_root`).
+- Semantics: fd/dir handle tables in the profile; `disc0:` read-only, `ms0:` writable under the same single game root; case-insensitive path fallback after `translate_path`; `SceIoStat`/`SceIoDirEnt` filled per PPSSPP layouts; PPSSPP error codes (ErrorCodes.h + errno mapping); the async family completes synchronously, results consumed via Poll/Wait/WaitCB; CPK parsing stays in guest code (the host serves bytes only).
+
+### Unit Verification (2026-10-23)
+
+- `profiles/p3p/scripts/verify_io.sh`: build clean.
+- `test_p3p_io`: **44 checks, 0 failures** — open/read/seek (SET/CUR/END, 64-bit)/getstat, traversal rejection, case-insensitive open, directory walk (`.`/`..`/entries), async open/read/close cycle with NO_ASYNC on re-poll, ms0 create/write/rename/read-back, disc0 write open rejected with `0x8001001E`.
+- `test_p3p_threading` regression: **128 checks, 0 failures**.
+
+### Boot Evidence (AOT, `--game-root profiles/p3p/game`, 50M dispatches)
+
+- **Zero IoFileMgr calls occur before the stop.** The stop is identical to the Gate 4B wall: guest memory access at `0x00000000`, `recomp_unit_0165`, guest_pc `0x08A9B7D8`.
+- The 22 stub imports fired before the stop, all resolved by name against PPSSPP tables: sceKernelSetCompiledSdkVersion600_602, sceKernelSetCompilerVersion, **sceKernelAllocPartitionMemory**, **sceKernelGetModuleIdByAddress**, sceKernelCpuSuspendIntr, sceKernelCpuResumeIntr, sceImposeSetLanguageMode, **sceKernelCreateCallback**, sceKernelRegisterExitCallback, sceUtilityLoadModule, sceKernelChangeCurrentThreadAttr, **sceGeEdramGetAddr**, **sceKernelCreateEventFlag**, sceGeSetCallback, sceGeListEnQueue, sceGeListSync, sceGeDrawSync, sceGeListUpdateStallAddr, sceDisplaySetMode, sceDisplayWaitVblankStartMultiCB, **sceDisplayGetFrameBuf**, sceDisplaySetFrameBuf.
+- Load-bearing return-0 stubs (semantically wrong as 0): `sceKernelAllocPartitionMemory` (block UID), `sceGeEdramGetAddr` (must return the EDRAM address `0x04000000`), `sceDisplayGetFrameBuf` (out-parameters never written), `sceKernelCreateCallback` / `sceKernelCreateEventFlag` (UIDs).
+- **CORRECTION:** `ModuleMgrForUser::0xD8B73127` is `sceKernelGetModuleIdByAddress`, not `sceKernelLoadModule` as earlier documents (Gate 4B notes, GATE5_PLAN) assumed. No LoadModule call occurs on the boot path up to the wall; the only module-related call seen is `sceUtilityLoadModule`. The plan's WP3 module-loading concern is not on the current critical path.
+
+### Verdict
+
+Gate 5's deliverable — the mounted game tree and a complete IoFileMgrForUser — is in place and verified in isolation. Boot progression past init now depends on minimal implementations of the early services listed above (SysMem partition allocation can reuse the kernel's existing RangeAllocator). Recommended as the next gate's scope.
