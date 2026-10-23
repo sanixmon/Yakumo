@@ -211,6 +211,70 @@ int main() {
               "output caller resumes after the call with result 0");
     }
 
+    // --- Audio channels: distinct allocation + sample-rate drain ---
+    {
+        psprecomp::Runtime runtime(32u * 1024u * 1024u);
+        P3PKernel kernel;
+        const std::int32_t loader = kernel.bootstrap_loader("loader", 0x08804108u, 0x20, 0u, 0x10000u);
+        const std::int32_t worker = kernel.create_thread("worker", 0x08807000u, 0x30, 0x10000u, 0u, 0u, runtime.memory());
+        check(kernel.start_thread(worker, 0u, 0u, runtime.memory()) == 0, "audio-alloc worker started");
+
+        // Channel state is process-global in the HLE; start from a
+        // clean slate so earlier blocks' reservations don't leak in.
+        {
+            psprecomp::AllegrexContext rel{};
+            for (std::uint32_t c = 0; c < 8u; ++c) {
+                rel.gpr[4] = c;
+                hle_audio_dispatch(runtime, rel, kernel, kNidAudioChRelease);
+            }
+        }
+
+        // Each reserve(-1) hands out the next free channel; the game
+        // relies on distinct channels per audio subsystem.
+        psprecomp::AllegrexContext ch{};
+        ch.gpr[4] = 0xFFFFFFFFu;  // -1: any free channel
+        ch.gpr[5] = 4410u;        // sample count: 100 ms at 44.1 kHz
+        hle_audio_dispatch(runtime, ch, kernel, kNidAudioChReserve);
+        check(ch.gpr[2] == 0u, "first reserve(-1) gets channel 0");
+        hle_audio_dispatch(runtime, ch, kernel, kNidAudioChReserve);
+        check(ch.gpr[2] == 1u, "second reserve(-1) gets channel 1, not 0 again");
+        // Releasing makes the channel the first free one again.
+        ch.gpr[4] = 0u;
+        check(hle_audio_dispatch(runtime, ch, kernel, kNidAudioChRelease) && ch.gpr[2] == 0u,
+              "release channel 0");
+        ch.gpr[4] = 0xFFFFFFFFu;
+        hle_audio_dispatch(runtime, ch, kernel, kNidAudioChReserve);
+        check(ch.gpr[2] == 0u, "reserve(-1) after release reuses channel 0");
+
+        // A blocking output on the channel parks the caller for the
+        // buffer's drain duration: 4410 samples at 44.1 kHz = 100 ms.
+        psprecomp::AllegrexContext live{};
+        live.pc = kFakeStub;
+        live.gpr[31] = 0x08807777u;
+        live.gpr[4] = 0u;  // channel 0
+        check(hle_audio_dispatch(runtime, live, kernel, kNidAudioOutputBlocking),
+              "blocking output handled");
+        check(kernel.current_uid() == worker, "blocking output yielded to the worker");
+        const P3PThread *loader_rec = kernel.find_thread(loader);
+        check(loader_rec->status == ThreadStatus::Waiting && loader_rec->timed_wait &&
+                  loader_rec->wake_at_us == 100000u,
+              "output caller sleeps exactly the drain duration");
+
+        // The worker observes the channel's rest length while it drains.
+        psprecomp::AllegrexContext rest{};
+        rest.gpr[4] = 0u;
+        check(hle_audio_dispatch(runtime, rest, kernel, kNidAudioGetChannelRestLength) &&
+                  rest.gpr[2] == 4410u,
+              "rest length reports the queued samples");
+
+        // Leave no reservations behind for later blocks.
+        psprecomp::AllegrexContext rel{};
+        rel.gpr[4] = 0u;
+        hle_audio_dispatch(runtime, rel, kernel, kNidAudioChRelease);
+        rel.gpr[4] = 1u;
+        hle_audio_dispatch(runtime, rel, kernel, kNidAudioChRelease);
+    }
+
     // --- WaitVblankStart is a frame-pacing scheduling point (Gate 5C) ---
     {
         psprecomp::Runtime runtime(32u * 1024u * 1024u);
