@@ -3,6 +3,7 @@
 // small platform services (ModuleMgr query, Kernel_Library, sceUtility).
 
 #include "hle/p3p_hle_gedisplay.hpp"
+#include "hle/p3p_hle_mpeg.hpp"
 #include "hle/p3p_hle_services.hpp"
 #include "hle/p3p_hle_sysmem.hpp"
 #include "hle/p3p_hle_umd.hpp"
@@ -331,6 +332,115 @@ int main() {
               "umd activate rejects a bad mode");
         check(!p3p::hle_umd_dispatch(runtime, uctx, 0xDEADBEEFu),
               "unknown umd nid unhandled");
+    }
+
+    // --- sceMpeg bring-up surface (multimedia package) ---
+    {
+        using namespace p3p;
+        auto &mem = runtime.memory();
+        constexpr std::uint32_t kRb = 0x09300000u;    // SceMpegRingbuffer (48 bytes)
+        constexpr std::uint32_t kMpeg = 0x09300100u;  // SceMpeg handle slot
+        constexpr std::uint32_t kData = 0x09300200u;  // Create's data buffer
+
+        psprecomp::AllegrexContext q{};
+        check(hle_mpeg_dispatch(runtime, q, 0x682A619Bu) && q.gpr[2] == 0u, "mpeg init");
+        q = {};
+        check(hle_mpeg_dispatch(runtime, q, 0xC132E22Fu) && q.gpr[2] == 0x10000u,
+              "mpeg QueryMemSize is 64 KiB");
+        q = {};
+        q.gpr[4] = 960u;
+        check(hle_mpeg_dispatch(runtime, q, 0xD7A29F46u) && q.gpr[2] == 960u * 2152u,
+              "ringbuffer QueryMemSize is packets * 2152");
+
+        // Construct a 4-packet ringbuffer over kBufAddr.
+        q = {};
+        q.gpr[4] = kRb;
+        q.gpr[5] = 4u;
+        q.gpr[6] = kBufAddr;
+        q.gpr[7] = 4u * 2152u;
+        q.gpr[8] = 0u;
+        check(hle_mpeg_dispatch(runtime, q, 0x37295ED8u) && q.gpr[2] == 0u, "ringbuffer construct");
+        check(mem.load32(kRb + 0u) == 4u && mem.load32(kRb + 16u) == 2048u &&
+                  mem.load32(kRb + 20u) == kBufAddr &&
+                  mem.load32(kRb + 32u) == kBufAddr + 4u * 2048u,
+              "ringbuffer fields stamped (packets/packetSize/data/upper)");
+        q.gpr[7] = 100u;  // too small for 4 packets
+        check(hle_mpeg_dispatch(runtime, q, 0x37295ED8u) && q.gpr[2] == 0x80610022u,
+              "undersized ringbuffer is NO_MEMORY");
+
+        // Create: too-small handle memory fails; the real size stamps
+        // the LIBMPEG handle into the data buffer at +0x30.
+        q = {};
+        q.gpr[4] = kMpeg;
+        q.gpr[5] = kData;
+        q.gpr[6] = 0x8000u;
+        q.gpr[7] = kRb;
+        check(hle_mpeg_dispatch(runtime, q, 0xD8C5F121u) && q.gpr[2] == 0x80610022u,
+              "create with undersized memory is NO_MEMORY");
+        q.gpr[6] = 0x10000u;
+        q.gpr[8] = 512u;  // frame width
+        check(hle_mpeg_dispatch(runtime, q, 0xD8C5F121u) && q.gpr[2] == 0u, "mpeg create");
+        check(mem.load32(kMpeg) == kData + 0x30u, "handle indirection written");
+        check(mem.load32(kData + 0x30u) == 0x4D42494Cu, "LIBMPEG magic (low word)");
+        check(mem.load32(kData + 0x30u + 16u) == kRb, "handle records the ringbuffer");
+        check(mem.load32(kRb + 40u) == kMpeg, "ringbuffer back-pointer set");
+
+        // A fake PSMF header at kOutAddr: magic, version, BE offset/size.
+        mem.store32(kOutAddr + 0u, 0x464D5350u);   // "PSMF"
+        mem.store32(kOutAddr + 4u, 0x00000105u);
+        mem.store32(kOutAddr + 8u, 0x00080000u);   // BE 2048
+        mem.store32(kOutAddr + 12u, 0x00A00000u);  // BE 0xA000 (byte-swapped below)
+        // store the size so its big-endian reading is 40960:
+        mem.store8(kOutAddr + 12u, 0u);
+        mem.store8(kOutAddr + 13u, 0u);
+        mem.store8(kOutAddr + 14u, 0xA0u);
+        mem.store8(kOutAddr + 15u, 0u);
+        q = {};
+        q.gpr[4] = kOutAddr;
+        q.gpr[5] = kOutAddr + 0x100u;
+        check(hle_mpeg_dispatch(runtime, q, 0x611E9E11u) && q.gpr[2] == 0u &&
+                  mem.load32(kOutAddr + 0x100u) == 40960u,
+              "QueryStreamSize reads the BE size");
+        q = {};
+        q.gpr[4] = kMpeg;
+        q.gpr[5] = kOutAddr;
+        q.gpr[6] = kOutAddr + 0x104u;
+        check(hle_mpeg_dispatch(runtime, q, 0x21FF80E4u) && q.gpr[2] == 0u &&
+                  mem.load32(kOutAddr + 0x104u) == 2048u,
+              "QueryStreamOffset reads the BE offset");
+
+        // Stream registration hands out sequential ids from 1.
+        q = {};
+        q.gpr[4] = kMpeg;
+        q.gpr[5] = 0u;
+        q.gpr[6] = 0u;
+        check(hle_mpeg_dispatch(runtime, q, 0x42560F23u) && q.gpr[2] == 1u, "regist AVC -> sid 1");
+        q.gpr[5] = 1u;
+        check(hle_mpeg_dispatch(runtime, q, 0x42560F23u) && q.gpr[2] == 2u, "regist audio -> sid 2");
+
+        // Available size / put bookkeeping.
+        q = {};
+        q.gpr[4] = kRb;
+        check(hle_mpeg_dispatch(runtime, q, 0xB5F6DC87u) && q.gpr[2] == 4u, "all 4 packets free");
+        q.gpr[5] = 3u;
+        q.gpr[6] = 10u;
+        check(hle_mpeg_dispatch(runtime, q, 0xB240A59Eu) && q.gpr[2] == 3u, "put enqueues 3");
+        q = {};
+        q.gpr[4] = kRb;
+        check(hle_mpeg_dispatch(runtime, q, 0xB5F6DC87u) && q.gpr[2] == 1u, "1 packet free after put");
+
+        // No demuxer: AU getters report NO_DATA; delete drops the ctx.
+        q = {};
+        q.gpr[4] = kMpeg;
+        check(hle_mpeg_dispatch(runtime, q, 0xFE246728u) && q.gpr[2] == 0x80618001u,
+              "GetAvcAu is NO_DATA without a demuxer");
+        check(hle_mpeg_dispatch(runtime, q, 0x606A4649u) && q.gpr[2] == 0u, "mpeg delete");
+        q.gpr[5] = 0u;
+        q.gpr[6] = 0u;
+        check(hle_mpeg_dispatch(runtime, q, 0x42560F23u) &&
+                  static_cast<std::int32_t>(q.gpr[2]) < 0,
+              "regist after delete fails");
+        check(!hle_mpeg_dispatch(runtime, q, 0xDEADBEEFu), "unknown mpeg nid unhandled");
     }
 
     std::fprintf(stderr, "test_p3p_services: %d checks, %d failures\n", g_checks, g_failures);

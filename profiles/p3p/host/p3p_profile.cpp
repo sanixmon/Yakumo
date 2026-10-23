@@ -6,6 +6,7 @@
 #include "hle/p3p_hle_sysmem.hpp"
 #include "hle/p3p_hle_audio.hpp"
 #include "hle/p3p_hle_umd.hpp"
+#include "hle/p3p_hle_mpeg.hpp"
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/common.hpp"
@@ -55,6 +56,8 @@ void dispatch_import(P3PKernel *kernel, const std::string &library, std::uint32_
         hle_gedisplay_dispatch(runtime, ctx, kernel, library, nid))
         return;
     if (library == "sceUmdUser" && hle_umd_dispatch(runtime, ctx, nid))
+        return;
+    if (library == "sceMpeg" && hle_mpeg_dispatch(runtime, ctx, nid))
         return;
     if (kernel != nullptr && library == "sceAudio" &&
         hle_audio_dispatch(runtime, ctx, *kernel, nid))

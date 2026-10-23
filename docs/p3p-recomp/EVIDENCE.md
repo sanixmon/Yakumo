@@ -712,3 +712,60 @@ host-side records, RegistStream returns stream ids, CreateSema
 returns real kernel UIDs (semaphores are also Gate 5B-era debt) --
 then re-run this boot and see whether the player populates its
 table or the game takes a graceful no-movie path.
+
+
+## Multimedia package -- semaphores + sceMpeg surface (2026-10-23, Gate 6 follow-up)
+
+Authorized as the fix for the investigated crash: the opening
+movie's bring-up was hollow. Two pieces landed.
+
+**Kernel semaphores** (the movie path creates UMD_SAMPLE_IO_SEMA,
+display_lockSema, sound_lockSema before touching streams):
+sceKernelCreateSema 0xD6DA4BA1 / DeleteSema 0x28B6489C / WaitSema
+0x4E3A1105 / WaitSemaCB 0x6D212BAC / SignalSema 0x3F53E640 /
+PollSema 0x58B1F937, modelled on PPSSPP's sceKernelSemaphore in the
+kernel's object style: blocking waits record WaitKind::Semaphore
+and complete through a signal-time deduction + hand-off at
+re-dispatch (the mutex pattern); signal overflow is judged as
+current + signal - waiters > max and changes nothing (SEMA_OVF
+0x800201AE); a poll may not jump a waiting queue (SEMA_ZERO
+0x800201AD); priority wake order under attr 0x100. Covered by 22
+new checks in test_p3p_yield (105 total).
+
+**sceMpeg HLE** (new unit host/hle/p3p_hle_mpeg.cpp), mirroring
+PPSSPP's sceMpeg structure-for-structure: Init/Finish (stream ids
+reset to 1), QueryMemSize = 0x10000, RingbufferQueryMemSize =
+packets * 2152, RingbufferConstruct stamps the SceMpegRingBuffer
+fields (packetSize 2048, dataUpperBound = data + packets * 2048,
+semaID untouched), Create validates the 64 KiB handle size, writes
+the data+0x30 handle indirection and the "LIBMPEG\0"/"001\0"
+stamp, QueryStreamOffset/Size analyze the real PSMF header
+(big-endian offset at +8, size at +12; the actual opening movie
+reports offset 2048, size 24987648), RegistStream returns
+sequential ids (AVC -> 1, audio -> 2), RingbufferPut /
+AvailableSize do honest packet bookkeeping, InitAu stamps a fresh
+SceMpegAu, Malloc/FreeAvcEsBuf track the two ES buffers,
+QueryAtracEsSize returns 2112/8192. Covered by 23 new checks in
+test_p3p_services (88 total). Deliberate limit, stated in the unit:
+no demuxer/decoder -- GetAvcAu/GetAtracAu return NO_DATA
+(0x80618001), AtracDecode NO_DATA, AvcDecode FATAL.
+
+**Boot result (40M dispatches): zero guest errors, dispatch limit
+reached -- the deterministic crash is gone.** The full bring-up
+fires in order: ringbuffer construct (960 packets over a guest
+buffer), Create (the SceMpeg struct sits at 0x08D64254, immediately
+after the former crash context at 0x08D6424C -- the "never-written"
+fields belonged to this player's state block), CreateSema x3,
+QueryStreamOffset/Size against the real P3OPMV_P3P.pmsf header,
+RegistStream x2. The player then spawns displayThread / readThread
+/ soundThread, which cycle on the player's event flag and timed
+waits; the fake clock advances ~270 s and rendering continues past
+the earlier totals (48.7M rasterized pixels cumulative, both VRAM
+banks full). Two observations for the next package: (1) the AU
+loop never receives data (no demuxer), so the movie never
+finishes -- playback completion needs a PSMF demuxer feeding AUs
+whose timestamps let the player reach end-of-stream; (2) in movie
+mode the display framebuffer pointer reads 0 in the periodic
+dumps, so --dump-frame has nothing to point at (VRAM itself is
+fully populated); a fallback to a VRAM bank would restore the
+visual check.
