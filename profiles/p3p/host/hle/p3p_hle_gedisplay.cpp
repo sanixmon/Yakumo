@@ -1,5 +1,7 @@
 #include "hle/p3p_hle_gedisplay.hpp"
 
+#include "kernel/p3p_kernel.hpp"
+
 #include "psprecomp/guest_memory.hpp"
 #include "psprecomp/runtime.hpp"
 
@@ -50,8 +52,27 @@ GeDisplayState g_state;
 
 void gedisplay_reset_state() { g_state = GeDisplayState{}; }
 
+// A vblank wait is a frame-pacing block in the reference kernel: the
+// caller sleeps until the next frame boundary, and that sleep is what lets
+// worker threads progress (the CRI ADX audio thread's main loop is
+// WaitVblankStart + decode pump; the CRI file thread only gets the CPU
+// while it waits). Gate 5C: with a kernel, complete the call (result
+// preset, resume at $ra) and sleep to the next frame boundary on the
+// kernel's fake clock — sleeping, not just yielding, so the waiter is
+// not Ready again until its frame arrives. Without a kernel, the
+// caller's counter advance is the whole effect.
+void wait_vblank(psprecomp::AllegrexContext &ctx, P3PKernel *kernel) {
+    ctx.set_gpr(2, 0u);
+    if (kernel != nullptr) {
+        ctx.pc = ctx.gpr[31];
+        constexpr std::uint64_t kFrameUs = 16667u;  // 59.94 Hz frame
+        const std::uint64_t now = kernel->now_us();
+        kernel->sleep_current(ctx, kFrameUs - (now % kFrameUs));
+    }
+}
+
 bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
-                            const std::string &library, std::uint32_t nid) {
+                            P3PKernel *kernel, const std::string &library, std::uint32_t nid) {
     psprecomp::GuestMemory &memory = runtime.memory();
     const auto set_v0 = [&ctx](std::uint32_t value) { ctx.set_gpr(2, value); };
 
@@ -111,11 +132,11 @@ bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexCont
             case kNidDisplayWaitVblankStart:
             case kNidDisplayWaitVblankStartCB:
                 g_state.vcount += 1u;
-                set_v0(0);
+                wait_vblank(ctx, kernel);
                 return true;
             case kNidDisplayWaitVblankStartMultiCB:
                 g_state.vcount += ctx.gpr[4] != 0u ? ctx.gpr[4] : 1u;
-                set_v0(0);
+                wait_vblank(ctx, kernel);
                 return true;
             case kNidDisplayGetVcount:
                 set_v0(g_state.vcount);

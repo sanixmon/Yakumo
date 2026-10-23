@@ -4,6 +4,8 @@
 #include "hle/p3p_hle_gedisplay.hpp"
 #include "hle/p3p_hle_services.hpp"
 #include "hle/p3p_hle_sysmem.hpp"
+#include "hle/p3p_hle_audio.hpp"
+#include "hle/p3p_hle_umd.hpp"
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/common.hpp"
@@ -47,7 +49,12 @@ void dispatch_import(P3PKernel *kernel, const std::string &library, std::uint32_
         hle_sysmem_dispatch(runtime, ctx, *kernel, nid))
         return;
     if ((library == kGeLibrary || library == kDisplayLibrary) &&
-        hle_gedisplay_dispatch(runtime, ctx, library, nid))
+        hle_gedisplay_dispatch(runtime, ctx, kernel, library, nid))
+        return;
+    if (library == "sceUmdUser" && hle_umd_dispatch(runtime, ctx, nid))
+        return;
+    if (kernel != nullptr && library == "sceAudio" &&
+        hle_audio_dispatch(runtime, ctx, *kernel, nid))
         return;
     if (hle_services_dispatch(runtime, ctx, kernel, library, nid))
         return;

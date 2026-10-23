@@ -21,10 +21,15 @@ namespace p3p {
 inline constexpr const char *kGeLibrary = "sceGe_user";
 inline constexpr const char *kDisplayLibrary = "sceDisplay";
 
+class P3PKernel;
+
 void gedisplay_reset_state();
 
-// Returns true when the NID was handled (result in $v0 / $f0).
+// Returns true when the NID was handled (result in $v0 / $f0). `kernel`
+// may be null (trace runner). With a kernel, vblank waits are scheduling
+// points (Gate 5C): the call completes and the CPU yields, so `ctx` may
+// hold another thread's context on return.
 bool hle_gedisplay_dispatch(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx,
-                            const std::string &library, std::uint32_t nid);
+                            P3PKernel *kernel, const std::string &library, std::uint32_t nid);
 
 }  // namespace p3p

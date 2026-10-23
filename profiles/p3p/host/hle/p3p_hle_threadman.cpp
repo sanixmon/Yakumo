@@ -53,6 +53,9 @@ std::int32_t hle_create_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexC
         // A new thread inherits the creator's $gp (the module $gp for threads
         // created by module_start).
         result = kernel.create_thread(name, entry, priority, stack_size, attr, ctx.gpr[28], memory);
+        if (result > 0)
+            std::fprintf(stderr, "[p3p] create thread '%s' prio %d entry %s -> uid %d\n",
+                         name.c_str(), priority, psprecomp::hex32(entry).c_str(), result);
     }
     ctx.set_gpr(2, static_cast<std::uint32_t>(result));  // $v0
     return result;
@@ -64,6 +67,8 @@ std::int32_t hle_start_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexCo
     const std::uint32_t arglen = ctx.gpr[5];                  // $a1
     const std::uint32_t argp = ctx.gpr[6];                    // $a2
     const std::int32_t result = kernel.start_thread(thid, arglen, argp, runtime.memory());
+    if (result == 0)
+        std::fprintf(stderr, "[p3p] start thread uid %d\n", thid);
     ctx.set_gpr(2, static_cast<std::uint32_t>(result));  // $v0
     return result;
 }
@@ -135,6 +140,7 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
             const std::uint32_t wait_pattern = ctx.gpr[5];
             const std::uint32_t mode = ctx.gpr[6];
             const std::uint32_t result_addr = ctx.gpr[7];
+            const std::uint32_t timeout_addr = ctx.gpr[8];  // EABI $t0
             std::uint32_t pattern = 0;
             if (!kernel.event_flag_pattern(a0, pattern)) {
                 set_v0(ctx, static_cast<std::int32_t>(kErrorUnknownEvfId));
@@ -142,29 +148,105 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
             }
             const bool satisfied = (mode & 1u) != 0u ? (pattern & wait_pattern) != 0u
                                                      : (pattern & wait_pattern) == wait_pattern;
-            if (result_addr != 0u)
-                memory.store32(result_addr, pattern);
             if (satisfied) {
+                kernel.clear_wait();
+                if (result_addr != 0u)
+                    memory.store32(result_addr, pattern);
                 if ((mode & 0x10u) != 0u)
                     kernel.clear_event_flag(a0, 0xFFFFFFFFu);      // WAITCLEARALL
                 else if ((mode & 0x20u) != 0u)
                     kernel.clear_event_flag(a0, wait_pattern);     // WAITCLEARPATTERN
-            } else {
-                // Headless approximation: a blocking wait cannot be honoured
-                // inside one dispatch; log it (once per uid+pattern) and
-                // report success with the current pattern.
-                static std::set<std::pair<std::int32_t, std::uint32_t>> logged;
-                if (logged.emplace(a0, wait_pattern).second)
-                    std::fprintf(stderr,
-                                 "[p3p] wait event flag uid %d would block (pattern %s, "
-                                 "wait %s, mode %s); returning success (headless)\n",
-                                 a0, psprecomp::hex32(pattern).c_str(),
-                                 psprecomp::hex32(wait_pattern).c_str(),
-                                 psprecomp::hex32(mode).c_str());
+                set_v0(ctx, 0);
+                return true;
             }
+            // Poll form (timeout pointer to a zero timeout) fails at once.
+            if (timeout_addr != 0u && memory.contains(timeout_addr, 4u) &&
+                memory.load32(timeout_addr) == 0u) {
+                set_v0(ctx, static_cast<std::int32_t>(kErrorEvfCond));
+                return true;
+            }
+            // Gate 5C: block for real. The wait is recorded on the thread and
+            // its saved context keeps pointing at this call, so when the
+            // thread is scheduled again the call re-dispatches and is
+            // re-evaluated (completing or blocking again). $v0/$pc must not
+            // be touched once the context has been switched away.
+            kernel.note_wait_event_flag(a0, wait_pattern, mode);
+            if (kernel.block_current(ctx))
+                return true;
+            kernel.clear_wait();
+            // No other thread can run, so blocking would deadlock the host.
+            // Fall back to the Gate 5B behaviour (log once, report success).
+            static std::set<std::pair<std::int32_t, std::uint32_t>> logged;
+            if (logged.emplace(a0, wait_pattern).second)
+                std::fprintf(stderr,
+                             "[p3p] wait event flag uid %d would block (pattern %s, "
+                             "wait %s, mode %s); returning success (headless)\n",
+                             a0, psprecomp::hex32(pattern).c_str(),
+                             psprecomp::hex32(wait_pattern).c_str(),
+                             psprecomp::hex32(mode).c_str());
+            if (result_addr != 0u)
+                memory.store32(result_addr, pattern);
             set_v0(ctx, 0);
             return true;
         }
+        case kNidCreateMutex: {
+            std::string name;
+            if (!read_guest_string(memory, ctx.gpr[4], 32u, name)) {
+                set_v0(ctx, static_cast<std::int32_t>(kErrorIllegalAddr));
+                return true;
+            }
+            const std::int32_t uid = kernel.create_mutex(
+                name, ctx.gpr[5], static_cast<std::int32_t>(ctx.gpr[6]));
+            if (uid > 0)
+                std::fprintf(stderr, "[p3p] create mutex '%s' attr %s count %d -> uid %d\n",
+                             name.c_str(), psprecomp::hex32(ctx.gpr[5]).c_str(),
+                             static_cast<std::int32_t>(ctx.gpr[6]), uid);
+            set_v0(ctx, uid);
+            return true;
+        }
+        case kNidDeleteMutex:
+            set_v0(ctx, kernel.delete_mutex(a0));
+            return true;
+        case kNidLockMutex:
+        case kNidLockMutexCB: {
+            const std::int32_t count = static_cast<std::int32_t>(ctx.gpr[5]);
+            const std::uint32_t timeout_addr = ctx.gpr[6];
+            std::int32_t error = 0;
+            const P3PKernel::MutexLockResult result = kernel.lock_mutex(a0, count, error);
+            if (result == P3PKernel::MutexLockResult::Acquired) {
+                set_v0(ctx, 0);
+                return true;
+            }
+            if (result == P3PKernel::MutexLockResult::Error) {
+                set_v0(ctx, error);
+                return true;
+            }
+            // Would block. A zero timeout makes the call a poll.
+            if (timeout_addr != 0u && memory.contains(timeout_addr, 4u) &&
+                memory.load32(timeout_addr) == 0u) {
+                set_v0(ctx, static_cast<std::int32_t>(kErrorWaitTimeout));
+                return true;
+            }
+            // Block for real (Gate 5C): the saved context stays on this
+            // call; an unlock hands ownership over and readies the
+            // thread, and the re-dispatched lock completes through the
+            // kernel's hand-off branch.
+            kernel.note_wait_mutex(a0, count);
+            if (kernel.block_current(ctx))
+                return true;
+            kernel.clear_wait();
+            static std::set<std::int32_t> mutex_logged;
+            if (mutex_logged.emplace(a0).second)
+                std::fprintf(stderr,
+                             "[p3p] lock mutex uid %d would block with no thread "
+                             "to run; returning success (headless)\n",
+                             a0);
+            set_v0(ctx, 0);
+            return true;
+        }
+        case kNidUnlockMutex:
+            set_v0(ctx, kernel.unlock_mutex(a0, static_cast<std::int32_t>(ctx.gpr[5])));
+            return true;
         case kNidChangeCurrentThreadAttr:
             set_v0(ctx, kernel.change_current_thread_attr(ctx.gpr[4], ctx.gpr[5]));
             return true;
@@ -175,7 +257,15 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
         case kNidDelayThread:
         case kNidDelayThreadCB:
             g_fake_time_us += ctx.gpr[4];
+            // Gate 5C: a delay blocks in the reference kernel. Preset
+            // the return value and the resume address (the caller's $ra)
+            // so the saved context continues right after this call, then
+            // sleep for the delay on the kernel's fake clock: other Ready
+            // threads run meanwhile, and when none can, the clock skips
+            // forward and execution simply continues at $ra.
             set_v0(ctx, 0);
+            ctx.pc = ctx.gpr[31];
+            kernel.sleep_current(ctx, ctx.gpr[4]);
             return true;
         case kNidExitThread:
             if (!kernel.exit_current_and_schedule_next(ctx))

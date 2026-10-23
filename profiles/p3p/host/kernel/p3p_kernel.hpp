@@ -32,6 +32,15 @@ inline constexpr std::uint32_t kErrorNotDormant = 0x800201A4u;   // start on non
 inline constexpr std::uint32_t kErrorDoubleFree = 0x800201B6u;   // allocator double-free (Gate 4A invariant 5)
 inline constexpr std::uint32_t kErrorIllegalArgument = 0x800200D2u;  // SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT
 inline constexpr std::uint32_t kErrorUnknownEvfId = 0x8002019Au;     // SCE_KERNEL_ERROR_UNKNOWN_EVFID
+inline constexpr std::uint32_t kErrorEvfCond = 0x800201AFu;          // SCE_KERNEL_ERROR_EVF_COND
+inline constexpr std::uint32_t kErrorUnknownObject = 0x800200CBu;  // SCE_KERNEL_ERROR_UNKNOWN_UID (object pools)
+inline constexpr std::uint32_t kErrorIllegalAttr = 0x80020191u;       // SCE_KERNEL_ERROR_ILLEGAL_ATTR
+inline constexpr std::uint32_t kErrorWaitTimeout = 0x800201A8u;       // SCE_KERNEL_ERROR_WAIT_TIMEOUT
+inline constexpr std::uint32_t kErrorIllegalCount = 0x800201BDu;      // SCE_KERNEL_ERROR_ILLEGAL_COUNT
+inline constexpr std::uint32_t kMutexErrorNotLocked = 0x800201C5u;    // SCE_MUTEX_ERROR_NOT_LOCKED
+inline constexpr std::uint32_t kMutexErrorLockOverflow = 0x800201C6u; // SCE_MUTEX_ERROR_LOCK_OVERFLOW
+inline constexpr std::uint32_t kMutexErrorUnlockUnderflow = 0x800201C7u;  // SCE_MUTEX_ERROR_UNLOCK_UNDERFLOW
+inline constexpr std::uint32_t kMutexErrorAlreadyLocked = 0x800201C8u;     // SCE_MUTEX_ERROR_ALREADY_LOCKED
 inline constexpr std::uint32_t kErrorNotFoundUidFunc = 0x800200CEu;  // SCE_KERNEL_ERROR_NOT_FOUND_UIDFUNC
 
 // RangeAllocator allocation types (mirrors sceKernelAllocPartitionMemory).
@@ -100,6 +109,7 @@ enum class ThreadStatus : std::uint32_t {
     Running = 2,
     Dead = 3,
     Deleted = 4,
+    Waiting = 5,  // Gate 5C: blocked on a recorded wait (see P3PThread)
 };
 
 struct P3PThread {
@@ -113,6 +123,26 @@ struct P3PThread {
     std::uint32_t stack_size = 0;     // allocated stack size in bytes
     ThreadStatus status = ThreadStatus::Dormant;
     psprecomp::AllegrexContext context{};  // saved context; live once Running
+    // Gate 5C: what a Waiting thread is blocked on. Event-flag waiters store
+    // the wait so the kernel can re-evaluate satisfaction when bits change;
+    // the blocked call itself stays pointed at its import stub in the saved
+    // context and is re-dispatched when the thread is scheduled again.
+    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3 };
+    WaitKind wait_kind = WaitKind::None;
+    std::int32_t wait_evf_uid = 0;
+    std::uint32_t wait_pattern = 0;
+    std::uint32_t wait_mode = 0;
+    std::int32_t wait_mutex_uid = 0;
+    std::int32_t wait_mutex_count = 0;
+    // Set when an unlock handed this thread ownership of a mutex while it
+    // was blocked in LockMutex: its re-dispatched lock call completes
+    // through lock_mutex's hand-off branch instead of acquiring again.
+    std::int32_t mutex_handed_uid = 0;
+    // Gate 5C timed waits (DelayThread, vblank pacing, audio drain): while
+    // timed_wait is set, a Waiting thread becomes Ready again once the
+    // kernel's fake clock reaches wake_at_us.
+    bool timed_wait = false;
+    std::uint64_t wake_at_us = 0;
 };
 
 class P3PKernel {
@@ -163,6 +193,44 @@ public:
     // thread's context into `live` and marks it Running. Returns false when
     // no Ready thread remains (`live` is then untouched).
     bool exit_current_and_schedule_next(psprecomp::AllegrexContext &live);
+
+    // Gate 5C cooperative scheduling points. yield_current saves the live
+    // context into the current thread, marks it Ready, and loads the
+    // highest-priority OTHER Ready thread (priority, then lowest UID — the
+    // exit hand-off's rule). block_current is identical except the current
+    // thread is marked Waiting. Both return false with `live` and every
+    // record untouched when no other thread can run, so the caller keeps
+    // the CPU and decides how to complete the call.
+    bool yield_current(psprecomp::AllegrexContext &live);
+    bool block_current(psprecomp::AllegrexContext &live);
+
+    // Gate 5C timed sleep: like block_current, but the thread wakes once
+    // the kernel's fake clock reaches now + duration_us. When no thread
+    // is Ready, rescheduling skips the clock forward to the next wake, so
+    // a lone sleeping thread simply continues after its (virtual) delay.
+    bool sleep_current(psprecomp::AllegrexContext &live, std::uint64_t duration_us);
+    [[nodiscard]] std::uint64_t now_us() const noexcept { return now_us_; }
+
+    // Records (or clears, with clear_wait) the current thread's pending
+    // wait. set_event_flag/delete_event_flag wake satisfied/dead waiters.
+    void note_wait_event_flag(std::int32_t evf_uid, std::uint32_t pattern, std::uint32_t mode);
+    void clear_wait();
+
+    // Mutexes (sceKernelCreateMutex family), modelled on the reference
+    // (PPSSPP sceKernelMutex.cpp): a lock level plus an owner; recursive
+    // re-locking only with attr 0x200; an initial count > 0 creates the
+    // mutex already locked by its creator. A blocked LockMutex waits as
+    // WaitKind::Mutex; unlock hands ownership straight to the best
+    // waiter (FIFO, or priority order with attr 0x100), whose resumed
+    // lock call then completes through lock_mutex's hand-off branch.
+    enum class MutexLockResult : std::uint32_t { Acquired = 0, Blocked = 1, Error = 2 };
+    std::int32_t create_mutex(const std::string &name, std::uint32_t attr,
+                              std::int32_t initial_count);
+    std::int32_t delete_mutex(std::int32_t uid);
+    MutexLockResult lock_mutex(std::int32_t uid, std::int32_t count, std::int32_t &error);
+    std::int32_t unlock_mutex(std::int32_t uid, std::int32_t count);
+    void note_wait_mutex(std::int32_t mutex_uid, std::int32_t count);
+    [[nodiscard]] std::size_t mutex_count() const noexcept { return mutexes_.size(); }
 
     [[nodiscard]] const P3PThread *find_thread(std::int32_t uid) const;
     [[nodiscard]] std::int32_t current_uid() const noexcept { return current_uid_; }
@@ -215,10 +283,19 @@ public:
     [[nodiscard]] std::int32_t module_uid_at(std::uint32_t address) const;
 
 private:
+    P3PThread *pick_ready_excluding(std::int32_t excluded_uid);
+    bool switch_away(psprecomp::AllegrexContext &live, ThreadStatus new_status, bool timed,
+                     std::uint64_t wake_at_us, const char *reason);
+    // Advances the fake clock to the earliest timed wake and readies every
+    // thread due by then. Returns false when no timed wait exists.
+    bool wake_due_timed_waiters();
+    void wake_event_flag_waiters(std::int32_t evf_uid);
+
     RangeAllocator allocator_;
     std::map<std::int32_t, P3PThread> threads_;
     std::int32_t next_uid_ = kFirstUid;
     std::int32_t current_uid_ = 0;
+    std::uint64_t now_us_ = 0;  // Gate 5C fake clock for timed waits
 
     struct MemoryBlock {
         std::string name;
@@ -239,9 +316,17 @@ private:
         std::uint32_t attr = 0;
         std::uint32_t pattern = 0;
     };
+    struct Mutex {
+        std::string name;
+        std::uint32_t attr = 0;
+        std::int32_t lock_level = 0;
+        std::int32_t owner_uid = 0;
+        std::vector<std::int32_t> waiters;  // FIFO
+    };
     std::map<std::int32_t, MemoryBlock> memory_blocks_;
     std::map<std::int32_t, Callback> callbacks_;
     std::map<std::int32_t, EventFlag> event_flags_;
+    std::map<std::int32_t, Mutex> mutexes_;
     std::int32_t main_module_uid_ = 0;
     std::uint32_t main_module_base_ = 0;
     std::uint32_t main_module_size_ = 0;

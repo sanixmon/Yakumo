@@ -48,6 +48,8 @@ add_library(p3p_hle STATIC
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_io.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_sysmem.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_gedisplay.cpp"
+    "${P3P_PROFILE_DIR}/host/hle/p3p_hle_audio.cpp"
+    "${P3P_PROFILE_DIR}/host/hle/p3p_hle_umd.cpp"
     "${P3P_PROFILE_DIR}/host/hle/p3p_hle_services.cpp"
 )
 target_include_directories(p3p_hle PUBLIC
@@ -102,4 +104,14 @@ if(PSPRECOMP_BUILD_PROFILE_TESTS)
     )
     target_link_libraries(test_p3p_services PRIVATE p3p_kernel p3p_hle psprecomp_core)
     add_test(NAME test_p3p_services COMMAND test_p3p_services)
+
+    add_executable(test_p3p_yield
+        "${P3P_PROFILE_DIR}/tests/test_p3p_yield.cpp"
+    )
+    target_include_directories(test_p3p_yield PRIVATE
+        "${P3P_PROFILE_DIR}/host"
+        "${CMAKE_SOURCE_DIR}/include"
+    )
+    target_link_libraries(test_p3p_yield PRIVATE p3p_kernel p3p_hle psprecomp_core)
+    add_test(NAME test_p3p_yield COMMAND test_p3p_yield)
 endif()

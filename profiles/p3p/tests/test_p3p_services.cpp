@@ -5,6 +5,7 @@
 #include "hle/p3p_hle_gedisplay.hpp"
 #include "hle/p3p_hle_services.hpp"
 #include "hle/p3p_hle_sysmem.hpp"
+#include "hle/p3p_hle_umd.hpp"
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/runtime.hpp"
@@ -203,35 +204,35 @@ int main() {
     // --- Ge / Display --------------------------------------------------------
     p3p::gedisplay_reset_state();
     ctx.gpr[4] = 0;
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceGe_user", 0xE47E40E4u) &&
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceGe_user", 0xE47E40E4u) &&
               v0() == 0x04000000u,
           "ge edram addr is 0x04000000");
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceGe_user", 0x1F6752ADu) &&
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceGe_user", 0x1F6752ADu) &&
               v0() == 0x00200000u,
           "ge edram size is 2MiB");
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceGe_user", 0xAB49E76Au),
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceGe_user", 0xAB49E76Au),
           "ge list enqueue handled");
     const std::uint32_t list1 = v0();
-    p3p::hle_gedisplay_dispatch(runtime, ctx, "sceGe_user", 0xAB49E76Au);
+    p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceGe_user", 0xAB49E76Au);
     check(v0() == list1 + 1u, "ge list ids increment");
     ctx.gpr[4] = 0x04044000u;  // topaddr
     ctx.gpr[5] = 512u;         // bufferwidth
     ctx.gpr[6] = 1u;           // pixelformat 5551
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceDisplay", 0x289D82FEu) && v0() == 0u,
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceDisplay", 0x289D82FEu) && v0() == 0u,
           "display set framebuf ok");
     ctx.gpr[4] = kOutAddr;
     ctx.gpr[5] = kOutAddr + 8u;
     ctx.gpr[6] = kOutAddr + 16u;
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceDisplay", 0xEEDA2E54u) &&
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceDisplay", 0xEEDA2E54u) &&
               v0() == 0x04044000u,
           "display get framebuf returns topaddr");
     check(runtime.memory().load32(kOutAddr) == 0x04044000u &&
               runtime.memory().load32(kOutAddr + 8u) == 512u &&
               runtime.memory().load32(kOutAddr + 16u) == 1u,
           "display get framebuf writes recorded values");
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceDisplay", 0x984C27E7u),
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceDisplay", 0x984C27E7u),
           "wait vblank handled");
-    check(p3p::hle_gedisplay_dispatch(runtime, ctx, "sceDisplay", 0x9C6EAAD7u) && v0() == 1u,
+    check(p3p::hle_gedisplay_dispatch(runtime, ctx, nullptr, "sceDisplay", 0x9C6EAAD7u) && v0() == 1u,
           "vcount advanced after vblank wait");
 
     // --- Services -------------------------------------------------------------
@@ -297,6 +298,40 @@ int main() {
     check(p3p::hle_services_dispatch(runtime, ctx, g_kernel, "sceUtility", 0x8874DBE0u) &&
               v0() == 3u,
           "savedata status FINISHED after second update");
+
+    // --- UMD: the disc is in, ready, readable (Gate 5C follow-up) ---
+    {
+        p3p::umd_reset_state();
+        psprecomp::AllegrexContext uctx{};
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0x46EBB729u) && uctx.gpr[2] == 1u,
+              "umd check medium reports the disc");
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0x6B4A146Cu) && uctx.gpr[2] == 0x32u,
+              "umd drive stat is present|ready|readable");
+        uctx.gpr[4] = 0x10u;  // wait for READY
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0x8EF08FCEu) && uctx.gpr[2] == 0u,
+              "umd wait drive stat completes");
+        uctx.gpr[4] = 0u;  // invalid mask
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0x8EF08FCEu) &&
+                  static_cast<std::int32_t>(uctx.gpr[2]) < 0,
+              "umd wait drive stat rejects an empty mask");
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0x20628E6Fu) && uctx.gpr[2] == 0u,
+              "umd error stat is clean");
+        // Activate against a real "disc0:" name in guest memory.
+        const std::uint32_t name_addr = 0x09000200u;
+        const char *disc = "disc0:";
+        for (std::uint32_t i = 0; i <= 6u; ++i)
+            runtime.memory().store8(name_addr + i, static_cast<std::uint8_t>(disc[i]));
+        uctx.gpr[4] = 1u;
+        uctx.gpr[5] = name_addr;
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0xC6183D47u) && uctx.gpr[2] == 0u,
+              "umd activate accepts disc0:");
+        uctx.gpr[4] = 3u;  // bad mode
+        check(p3p::hle_umd_dispatch(runtime, uctx, 0xC6183D47u) &&
+                  static_cast<std::int32_t>(uctx.gpr[2]) < 0,
+              "umd activate rejects a bad mode");
+        check(!p3p::hle_umd_dispatch(runtime, uctx, 0xDEADBEEFu),
+              "unknown umd nid unhandled");
+    }
 
     std::fprintf(stderr, "test_p3p_services: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
