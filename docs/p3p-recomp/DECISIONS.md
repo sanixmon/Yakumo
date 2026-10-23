@@ -67,3 +67,10 @@ This document records all architectural decisions made for the Persona 3 Portabl
 - **Evidence**: Verified with 7 formal invariants in Gate 4A-R3 Python verification suite.
 - **Known Limitations**: Allocator operates on guest user partition (`0x08EC1000..0x0A800000`).
 - **Revisiting Conditions**: If P3P requires complex memory partition attributes (`MPID`).
+
+
+### ADR-007: PSP EABI Argument Convention for HLE Dispatch (a0-a3, t0-t3, stack at sp+0)
+
+- **Context**: Gate 5B's first boot showed `sceKernelAllocPartitionMemory('UserSbrk', 16 MiB, PSP_SMEM_LowAligned)` rejected: the alignment, read from `$sp+16` under an o32 layout assumption (the same assumption Gate 4B used for CreateThread's `attr` and Gate 5 for Lseek's `whence`), was stack garbage (`0xFFFFFFFF` — the kernel's own 0xFF stack fill). Disassembling the caller from guest memory shows the alignment (4096) is loaded into `$t0` in the jal delay slot, and PPSSPP's instruction trace shows the identical call succeeding (returns UID `0x115`). PPSSPP's HLE layer documents why (`Core/HLE/HLE.cpp`, `ReadVarArgWord`): psp-gcc builds for the MIPS EABI — the first eight arguments travel in `a0-a3` and `t0-t3`, and the rest go on the stack starting at `sp+0`.
+- **Decision**: All profile HLE argument reads follow the EABI layout: parameters 1-4 in `$a0-$a3`, parameters 5-8 in `$t0-$t3`, parameters 9+ on the stack at `$sp+0`. The three o32 reads (AllocPartitionMemory address, CreateThread attr, IoLseek whence) were corrected, and their unit tests now drive those arguments through `$t0`.
+- **Consequences**: Gate 4B's CreateThread attr read was a latent bug — it consumed whatever the caller's stack slot happened to hold (a usable value by luck). It is fixed, and the Gate 4B oracle window still verifies PASS (`scripts/verify_boot.sh`). Any future HLE function with 5+ parameters must source parameters 5-8 from `$t0-$t3`; an `$sp+16` argument read in HLE code is a defect.

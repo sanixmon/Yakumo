@@ -15,7 +15,9 @@ This document tracks authorization, entry criteria, exit criteria, and status fo
 | **Gate 3A** | Trace Semantic Alignment | **PASS** | User | None (Divergence proven at Call #3 UID return) |
 | **Gate 4A** | Minimal Threading Specification (R1-R3) | **PASS / AUDIT COMPLETE** | User | None (All 4 blockers mathematically resolved) |
 | **Gate 4B** | Threading HLE Implementation | **PASS** | User (2026-10-23) | None |
-| **Gate 5** | Headless CPK Mount & File I/O | **IMPLEMENTED (boot exit blocked upstream)** | — | Prerequisite: Gate 4B PASS. IoFileMgr implemented + unit-verified 44/44 (2026-10-23); boot reaches no I/O call yet — stopped earlier by return-0 stubs for SysMem/Ge/Display services; see EVIDENCE Gate 5 section |
+| **Gate 5** | Headless CPK Mount & File I/O | **IMPLEMENTED (boot exit blocked upstream)** | — | Prerequisite: Gate 4B PASS. IoFileMgr implemented + unit-verified 44/44 (2026-10-23); the pre-I/O stub wall was cleared by Gate 5B, but boot still reaches no I/O call: CRI performs loading on its own worker thread, which the exit-only scheduler never runs (see Gate 5C) |
+| **Gate 5B** | Early Kernel & Display Services | **PASS** | User (2026-10-23) | None. SysMem partition blocks over the kernel allocator, callback/event-flag UIDs, Ge/Display state with real return values, ModuleMgr/Kernel_Library/Utility minimums; 57/57 new unit checks, regressions green, verify_boot PASS. EABI argument convention recorded as ADR-007 |
+| **Gate 5C** | Cooperative Thread Yield (CRI Worker Progress) | **PROPOSED — awaiting authorization** | — | Diagnosis complete (EVIDENCE Gate 5B): the boot loop is the game's frame cycle calling CRI server functions while CRI's loader thread starves under the exit-only cooperative scheduler. Scope: yield on DelayThread/blocking waits so Ready threads run; verify the CRI thread executes and the first sceIoOpen is served |
 | **Gate 6** | 2D Graphics Engine to Vulkan | **NOT STARTED** | — | Prerequisite: Gate 5 PASS |
 | **Gate 7** | Audio Synthesis (CRI / SAS) | **NOT STARTED** | — | Prerequisite: Gate 6 PASS |
 | **Gate 8** | 3D Tartarus & Battle Logic | **NOT STARTED** | — | Prerequisite: Gate 7 PASS |

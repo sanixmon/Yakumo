@@ -25,20 +25,21 @@ Develop a native static recompilation port of **Shin Megami Tensei: Persona 3 Po
 - **Local Working-Tree Status**: Clean — all P3P work committed on `feature/p3p-recomp` and pushed to the fork (`sanixmon/Yakumo`).
 - **AOT Corpus (2026-10-23)**: Codegen complete — `profiles/p3p/generated/` (gitignored): 224 units + registry, 14,787 functions, 706,236 instructions, 221 import wrappers. Corpus compiles 225/225 objects with 0 errors via target `p3p_generated` in build tree `out/p3p-build` (Ninja, `PSPRECOMP_PROFILE=p3p`, `PSPRECOMP_GENERATED_JOBS=1`). The old `out/p3p` tree is STALE (its source path `/tmp/recomp_workspace` no longer exists) — do not use it.
 - **Host Wiring Plan (2026-10-23)**: `docs/p3p-recomp/HOST_WIRING_PLAN.md`.
+- **Gate 5B (2026-10-23)**: Early services implemented and unit-verified (`test_p3p_services` 57/57; regressions 44/44 + 128/128; `verify_boot.sh` PASS). PSP EABI argument convention established (ADR-007). Boot now passes the pre-I/O wall, completes heap + UMD/audio init, and settles into the game's CRI frame loop; CRI's loader thread never runs under the exit-only scheduler — proposed as Gate 5C (see GATES.md / EVIDENCE.md).
 
 ---
 
 ## 3. Current Gate & Milestone Status
 
-- **Latest Completed Gate**: **Gate 4B (Threading HLE Implementation)** — `VERDICT: PASS` (2026-10-23)
-- **Current Gate Status**: **Gate 5 (Headless CPK Mount & File I/O) — IMPLEMENTED 2026-10-23; boot exit blocked by pre-I/O services (see EVIDENCE)**
+- **Latest Completed Gate**: **Gate 5B (Early Kernel & Display Services)** — `VERDICT: PASS` (2026-10-23)
+- **Current Gate Status**: **Gate 5 (Headless CPK Mount & File I/O) — IMPLEMENTED 2026-10-23; its boot-exit criterion is blocked by CRI worker-thread starvation, proposed as Gate 5C (awaiting authorization)**
 - **Gate 4B Results (2026-10-23)**: AOT executable host `p3p` boots the ELF; `p3p_kernel` (RangeAllocator + thread lifecycle) and `p3p_hle_threadman` (Create/Start) implemented per the Gate 4A specification. Unit tests 128/128 pass. Oracle window `0x0880421C`–`0x08804260` matches PPSSPP (see EVIDENCE.md Gate 4B section; `profiles/p3p/scripts/verify_boot.sh` reproduces the full loop). Boot proceeds past Call #5 deep into game init and stops at a guest null dereference caused by a return-0 stub — Gate 5+ HLE territory, not a Gate 4B defect.
 - **Gate 5 Outcome (2026-10-23)**: Media supplied by the user and verified byte-identical to the analyzed dump (EBOOT.BIN sha256 match); IoFileMgrForUser fully implemented and unit-verified (44/44). Boot reaches no I/O call yet: it stops at the pre-I/O wall (guest null deref, `recomp_unit_0165`, `0x08A9B7D8`) behind return-0 stubs for early services (sceKernelAllocPartitionMemory, sceGeEdramGetAddr, sceDisplayGetFrameBuf, sceKernelCreateCallback/CreateEventFlag, sceKernelGetModuleIdByAddress).
-- **Recommended Next Step**: a minimal early-services gate (SysMem partition allocation over the kernel's RangeAllocator, Ge/Display state stubs with real return values, callback/event-flag UIDs) so init can advance to the first `sceIoOpen`, which Gate 5 has ready. Requires explicit user authorization.
+- **Recommended Next Step**: Gate 5C — cooperative thread yield (DelayThread and blocking waits hand off to the highest-priority Ready thread) so CRI's loader thread runs and boot reaches the first `sceIoOpen`, which Gate 5 has ready. Requires explicit user authorization.
 - **Explicitly Prohibited in Next Step**:
   - NO changes to `src/` or `include/psprecomp/`.
   - NO renderer or audio work before its gate.
-  - NO implementing full `ThreadMan` (semaphores, event flags, mutexes deferred).
+  - NO implementing full `ThreadMan` sync primitives beyond Gate 5B's authorized minimums (callbacks + event flags with UIDs; semaphores/mutexes beyond creation remain deferred).
 
 ---
 

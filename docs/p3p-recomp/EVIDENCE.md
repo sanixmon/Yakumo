@@ -201,3 +201,36 @@ Dumped via `/home/ubuntu/recompile/yakumo_repo/out/framework/dump_function`:
 ### Verdict
 
 Gate 5's deliverable — the mounted game tree and a complete IoFileMgrForUser — is in place and verified in isolation. Boot progression past init now depends on minimal implementations of the early services listed above (SysMem partition allocation can reuse the kernel's existing RangeAllocator). Recommended as the next gate's scope.
+
+## Gate 5B — Early Kernel & Display Services (2026-10-23)
+
+### Scope & Authorization
+
+Authorized by the user ("kerjakan sesuai ard") following Gate 5's verdict. Scope: the minimal early services the boot path hits before any file I/O — SysMem partition allocation, ThreadMan callbacks/event flags, Ge/Display state with truthful return values, and minimum ModuleMgr/Kernel_Library/Utility/Impose behaviour. All code lives in `profiles/p3p/` (ADR-004); object UIDs come from the kernel's single monotonic counter (ADR-003).
+
+### Implementation
+
+- **Kernel** (`p3p_kernel.{hpp,cpp}`): `RangeAllocator::allocate_at` (PSP_SMEM_Addr); partition-block registry (`alloc/free_partition_memory`, `block_head_address`) over the existing coalescing allocator; callback registry (create/delete/notify/check for the current thread); event-flag registry (create/delete/set/clear/pattern); `change_current_thread_attr`; main-module span registry backing `sceKernelGetModuleIdByAddress`.
+- **`p3p_hle_sysmem.cpp`**: AllocPartitionMemory (all five PSP_SMEM types), FreePartitionMemory, GetBlockHeadAddr, sceKernelPrintf (logged), SDK/compiler version setters.
+- **`p3p_hle_threadman.cpp`** (extended): CreateCallback/DeleteCallback/CheckCallback, CreateEventFlag/Set/Clear/Delete, WaitEventFlag(+CB) with PSP wait/clear modes (an unsatisfied wait is logged and completed non-blockingly — headless approximation), ChangeCurrentThreadAttr, GetSystemTimeLow/DelayThread over a fake clock that always advances, ExitThread via the kernel hand-off.
+- **`p3p_hle_gedisplay.cpp`**: sceGe EdramGetAddr (`0x04000000`)/EdramGetSize (2 MiB), list & callback ids, ListSync/DrawSync report completion; sceDisplay mode/framebuf record, GetFrameBuf writes the recorded values, vblank waits advance the vcount, GetFramePerSec returns 59.94.
+- **`p3p_hle_services.cpp`**: sceImposeSetLanguageMode; sceUtility Load/UnloadModule + a savedata/msgdialog status state machine (NONE→INIT_STARTED→RUNNING→FINISHED, SHUTDOWN_STARTED→NONE); LoadExec RegisterExitCallback/ExitGame; ModuleMgr GetModuleIdByAddress only (LoadModule family stays stubbed — not on the boot path, per Gate 5's correction); Kernel_Library CpuSuspendIntr/CpuResumeIntr state, Memcpy/Memset through guest memory, GetThreadId, LwMutex no-ops.
+
+### The EABI Correction (ADR-007)
+
+The gate's first boot rejected `AllocPartitionMemory('UserSbrk', 16 MiB, LowAligned)`: the alignment was read from `$sp+16` (o32 assumption) and contained stack garbage. Evidence chain: guest-memory disassembly of the caller shows the alignment (4096) loaded into `$t0` in the jal delay slot (`0x08B4E704`); PPSSPP's instruction trace shows the identical call succeeding (UID `0x115`); PPSSPP's HLE source documents the MIPS EABI argument layout (ADR-007). Three reads were corrected to `$t0` — AllocPartitionMemory's address, **CreateThread's attr (a latent Gate 4B bug: it had consumed a coincidentally usable stack value)**, and IoLseek's whence — and the three unit tests now pass those arguments in `$t0`. After the fix `verify_boot.sh` still reports the Gate 4B oracle window PASS.
+
+### Verification
+
+- `test_p3p_services`: **57 checks, 0 failures** — partition alloc (Low/High/Addr, head alignment, NO_MEMORY, UNKNOWN_UID on re-free), printf, callback UID + notify/check, event-flag set/clear/wait incl. WAITCLEARPATTERN, thread attr mutation, fake-clock advance, Ge EDRAM constants + list ids, Display framebuf record round-trip + vcount, ModuleMgr in/out-of-image, Kernel_Library memcpy/memset/intr state/GetThreadId, Utility dialog state machine.
+- Regressions: `test_p3p_io` **44/44**, `test_p3p_threading` **128/128**, `scripts/verify_boot.sh` **OK**.
+
+### Boot Evidence (AOT, `--game-root profiles/p3p/game`)
+
+- `sceKernelAllocPartitionMemory('UserSbrk', 0x01000000)` → **UID 103, head `0x08EC1000`**. The Gate 4B/5 null-dereference wall (`0x08A9B7D8`) is gone.
+- Init proceeds through: `sceUtilityLoadModule(0x300/0x302)`, the UMD sequence (`sceUmdRegisterUMDCallBack`, `sceUmdCheckMedium`, `sceUmdWaitDriveStat`, `sceUmdActivate`), ThreadMan `CreateMutex`/`CreateLwMutex`/`GetThreadCurrentPriority`/`ChangeThreadPriority`, and audio setup (`sceAudioChReserve`, `sceAudioChangeChannelConfig`, `sceAudioSetChannelDataLen`) — all still return-0 stubs, none load-bearing yet.
+- Execution then settles into an indefinite frame cycle and issues **no further imports and no `sceIoOpen`**. Diagnosis from a 37,028,985-instruction interpreter oracle trace: the pc distribution is identical 10M instructions apart; the cycle is ~900 instructions through engine/CRI utility functions (`0x08B756xx`–`0x08B761xx`, called from `0x08B485xx`/`0x08B779xx`/`0x08B7Bxxx`) on a single thread (sp `0x09FEF8xx`); a string referenced in the cycle (`0x08B95810`) is the CRIWARE banner (`CRI Base/PSP Ver.2.06`). The loop is the game pumping CRI server functions each frame; CRI performs CPK loading asynchronously on **its own ThreadMan thread**, which the Gate 4B exit-only cooperative scheduler never runs while `user_main` loops. Loads therefore never start and no thread ever issues `sceIoOpen`.
+
+### Verdict
+
+**Gate 5B: PASS.** Every service in scope is implemented and unit-verified; boot advances past the entire pre-I/O wall into engine init. Reaching the first `sceIoOpen` is no longer an HLE-value problem but a scheduler-coverage one — proposed as **Gate 5C (cooperative thread yield)**, awaiting authorization.
