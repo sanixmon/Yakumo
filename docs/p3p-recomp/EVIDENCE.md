@@ -234,3 +234,93 @@ The gate's first boot rejected `AllocPartitionMemory('UserSbrk', 16 MiB, LowAlig
 ### Verdict
 
 **Gate 5B: PASS.** Every service in scope is implemented and unit-verified; boot advances past the entire pre-I/O wall into engine init. Reaching the first `sceIoOpen` is no longer an HLE-value problem but a scheduler-coverage one — proposed as **Gate 5C (cooperative thread yield)**, awaiting authorization.
+
+
+---
+
+## Gate 5C — Cooperative Scheduling & Sync Semantics (2026-10-23)
+
+### What was built
+
+- **Kernel scheduling** (`p3p_kernel`): `ThreadStatus::Waiting`, per-thread
+  wait records (event flag / mutex), `yield_current` / `block_current` /
+  `sleep_current` over a shared priority picker (the exit hand-off's rule:
+  highest priority, then lowest UID), a fake clock (`now_us_`) with idle
+  time-skip to the next timed wake (also applied on the exit path).
+- **Timed sleeps as scheduling points**: `sceKernelDelayThread` sleeps for
+  the delay; sceDisplay vblank waits (`WaitVblankStart`, `WaitVblank`,
+  `WaitVblankStartMultiCB`) sleep to the next frame boundary; the sceAudio
+  blocking outputs (`p3p_hle_audio`: OutputBlocking, OutputPannedBlocking,
+  Output2OutputBlocking, SRCOutputBlocking) sleep to the next frame
+  boundary as a drain model. Channel calls return real values
+  (ChReserve returns the channel, `-1` → 0; Output2 rest sample 0).
+- **Blocking waits**: `sceKernelWaitEventFlag` blocks for real — the saved
+  context stays on the call and re-dispatches on resume; satisfied waits
+  complete with the result pattern and WAITCLEAR modes; a zero-timeout
+  poll returns `SCE_KERNEL_ERROR_EVF_COND`; `sceKernelSetEventFlag` /
+  delete wake satisfied waiters. When no thread can run, the previous
+  headless approximation (log once, report success) is kept as a fallback.
+- **Mutexes** (PPSSPP `sceKernelMutex.cpp` semantics): create (initial
+  count > 0 = created locked by the creator; recursive only with attr
+  `0x200`, priority wake order with `0x100`), lock (blocking, poll
+  `WAIT_TIMEOUT`, `ALREADY_LOCKED` for a non-recursive owner relock),
+  unlock with direct ownership hand-off to the best waiter, delete waking
+  its waiters. Reference error codes are used throughout.
+- **UMD** (`p3p_hle_umd`): the Gate 5 stub returned 0 for every UMD call,
+  which for `sceUmdCheckMedium` means "no disc in the drive". Now:
+  CheckMedium = 1, GetDriveStat = `PRESENT|READY|READABLE` (0x32),
+  WaitDriveStat/CB complete when the requested state already holds,
+  Activate validates mode + `disc0:` name, GetErrorStat = 0, callback
+  register/unregister recorded.
+
+### How the blocker chain was found
+
+1. With yield-only scheduling, the boot's threads switched but two
+   frame-paced threads (`CRI ADX Audio` waiting vblank, `CRI Wave out`
+   blocking on audio output) ping-ponged and `CRI ADX File` starved —
+   hence timed sleeps: a blocked thread is not Ready until its time.
+2. With timed sleeps all threads rotated, but still no file was requested.
+   A diff of import coverage against the inherited PPSSPP instruction
+   trace (which reaches `sceIoOpen` at sequence 83246) showed exactly six
+   imports PPSSPP executes that the boot never did; the load-bearing ones
+   were the mutex family: `sceKernelCreateMutex` was a return-0 stub, so
+   CRI's `CriCsPsp` critical sections never received a UID, no thread ever
+   locked/unlocked, and the event-flag traffic that precedes the first
+   open never happened.
+3. With real mutexes, the CRI thread pool (`CriThread` ×3) spawns, the
+   `CRI ADX File` thread issues the opens, and CPK parsing begins
+   (`sceIoLseek` + `sceIoRead` follow the opens).
+
+### Verification
+
+- `test_p3p_yield`: **83 checks, 0 failures** — delay yield/resume, solo
+  delay, event-flag block/wake/re-dispatch + poll, audio/vblank yield and
+  sleep state, the CRI starvation scenario (audio thread vblank-sleeps,
+  wave thread audio-sleeps, lower-priority file thread runs), mutex
+  ownership/recursion errors/hand-off round trip, poll WAIT_TIMEOUT.
+- `test_p3p_services`: **65 checks, 0 failures** (57 Gate 5B checks + 8
+  UMD checks). Regressions: `test_p3p_io` **44/44**,
+  `test_p3p_threading` **128/128**, `scripts/verify_boot.sh` **OK**
+  (Gate 4B oracle window untouched).
+
+### Boot Evidence (AOT, `--game-root profiles/p3p/game`)
+
+- Threads created and scheduled: `user_main` (102), `SceWaveMain` (108),
+  `CriThread` ×3 (111/114/117), `CRI ADX Audio` (128), `CRI ADX File`
+  (129), `CRI Wave out` (130); context switches rotate across all of them.
+- CRI mutexes created with real UIDs (`CriCsPsp`, attr `0x100`); UMD
+  activated for `disc0:`.
+- **First file I/O served**:
+  `[p3p-io] open 'disc0:/PSP_GAME/USRDIR/umd0.cpk' flags=0x00004001 -> fd 3`
+  and the same for `umd1.cpk` (fd 4), followed by `sceIoLseek` /
+  `sceIoRead` as CRI parses the archives.
+
+### Verdict
+
+**Gate 5C: PASS.** CRI's worker threads execute under the cooperative
+scheduler, and the boot reaches and serves the first `sceIoOpen` — which
+also closes **Gate 5's** exit criterion. Remaining stubs observed in the
+boot (`sceKernelLoadModule`, `sceKernelCreateLwMutex` — whose success
+return is 0 anyway, `sceKernelChangeThreadPriority`,
+`sceKernelGetThreadCurrentPriority`) are not load-bearing for this
+criterion and belong to later gates' scope.

@@ -74,3 +74,49 @@ This document records all architectural decisions made for the Persona 3 Portabl
 - **Context**: Gate 5B's first boot showed `sceKernelAllocPartitionMemory('UserSbrk', 16 MiB, PSP_SMEM_LowAligned)` rejected: the alignment, read from `$sp+16` under an o32 layout assumption (the same assumption Gate 4B used for CreateThread's `attr` and Gate 5 for Lseek's `whence`), was stack garbage (`0xFFFFFFFF` — the kernel's own 0xFF stack fill). Disassembling the caller from guest memory shows the alignment (4096) is loaded into `$t0` in the jal delay slot, and PPSSPP's instruction trace shows the identical call succeeding (returns UID `0x115`). PPSSPP's HLE layer documents why (`Core/HLE/HLE.cpp`, `ReadVarArgWord`): psp-gcc builds for the MIPS EABI — the first eight arguments travel in `a0-a3` and `t0-t3`, and the rest go on the stack starting at `sp+0`.
 - **Decision**: All profile HLE argument reads follow the EABI layout: parameters 1-4 in `$a0-$a3`, parameters 5-8 in `$t0-$t3`, parameters 9+ on the stack at `$sp+0`. The three o32 reads (AllocPartitionMemory address, CreateThread attr, IoLseek whence) were corrected, and their unit tests now drive those arguments through `$t0`.
 - **Consequences**: Gate 4B's CreateThread attr read was a latent bug — it consumed whatever the caller's stack slot happened to hold (a usable value by luck). It is fixed, and the Gate 4B oracle window still verifies PASS (`scripts/verify_boot.sh`). Any future HLE function with 5+ parameters must source parameters 5-8 from `$t0-$t3`; an `$sp+16` argument read in HLE code is a defect.
+
+
+### ADR-008: Cooperative Scheduling with Timed Sleeps, Re-Dispatch Blocking Waits, and Mutex Hand-Off (Gate 5C)
+
+**Context.** The Gate 4B scheduler only switched threads at thread exit. That
+starved every worker the game creates: CRI performs CPK loading on its own
+threads while `user_main` pumps server functions per frame, so no `sceIoOpen`
+was ever issued. A naive yield-on-wait model was then shown to starve workers
+a second way: with instant (headless) completion, a high-priority thread that
+"blocks" becomes Ready again immediately and two such threads ping-pong
+forever while lower-priority threads never run. On hardware the blocked
+thread is *asleep for a duration* (until the next vblank, until its samples
+drain, until its delay expires) and is not Ready in between.
+
+**Decision.**
+- The kernel gains three scheduling primitives beside the exit hand-off, all
+  sharing one picker (highest priority, then lowest UID): `yield_current`
+  (voluntary, stays Ready), `block_current` (untimed wait), and
+  `sleep_current(duration)` (timed wait on a kernel fake clock). When no
+  thread is Ready, the clock idle-skips to the earliest timed wake and due
+  sleepers become Ready; the same skip applies on the exit path.
+- Scheduling points: `sceKernelDelayThread` (sleeps for the delay), the
+  sceDisplay vblank waits (sleep to the next 16667us frame boundary), and the
+  sceAudio blocking outputs (sleep to the next frame boundary as the drain
+  model). Each presets its return value and resume address ($ra) before
+  sleeping, so the saved context continues after the call.
+- Blocking waits (WaitEventFlag, LockMutex) save the thread's context
+  *pointing at the call*; the call is re-dispatched when the thread is
+  scheduled again and re-evaluates its condition. Event-flag waiters are
+  re-readied by set/delete; mutex unlock instead hands ownership directly to
+  the best waiter (FIFO, or priority order with attr 0x100), marking the
+  thread so its re-dispatched lock completes through a hand-off branch in
+  `lock_mutex` rather than acquiring twice.
+- Time is virtual: the fake clock advances only via sleeps and idle skips.
+  Nothing couples guest progress to wall-clock time, keeping runs
+  deterministic. Non-poll timeouts on event-flag/mutex waits are not yet
+  modelled (a timed-out wait behaves as wait-forever until satisfied);
+  poll forms (zero timeout) return the reference error codes.
+
+**Consequences.** All CRI threads (file, audio, wave-out, generic CriThread
+pool) now receive CPU in priority order and the boot serves real file I/O
+(both CPK archives opened and read). The single-live-context invariant of
+Gate 4B is unchanged: switches still happen only inside an HLE dispatch or
+the exit hand-off, and the import wrapper's pc guard (ADR-007 era) makes a
+handler-switched context safe. `verify_boot.sh` (Gate 4B oracle window) is
+unaffected and still passes.
