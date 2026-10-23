@@ -117,6 +117,147 @@ namespace {
 // instead of an infinite trap loop.
 std::unordered_map<std::uint32_t, std::uint32_t> g_trap_counts;
 std::unordered_map<std::uint32_t, std::uint32_t> g_bridge_skips;
+std::unordered_map<std::uint32_t, std::uint32_t> g_bridge_execs;
+
+// ---------------------------------------------------------------------------
+// VFPU instructions neither the code generator nor the framework
+// interpreter implements: vcrs/vdet from the VFPU1 group and the VFPU7
+// int-pack family (vi2uc/vi2c/vi2us/vi2s). The bridge executes these
+// directly on the context, mirroring PPSSPP's interpreter semantics
+// (forced prefix rewrites included) with the framework's own prefix
+// machinery. Operand field extraction matches the interpreter's local
+// helpers in src/interpreter.cpp (duplicated here; ADR-004 keeps this
+// profile-side).
+
+constexpr std::uint32_t p3p_vfpu_length(std::uint32_t word) noexcept {
+    return (((word >> 7u) & 1u) | (((word >> 15u) & 1u) << 1u)) + 1u;
+}
+constexpr std::uint32_t p3p_vfpu_vd(std::uint32_t word) noexcept { return word & 0x7Fu; }
+constexpr std::uint32_t p3p_vfpu_vs(std::uint32_t word) noexcept { return (word >> 8u) & 0x7Fu; }
+constexpr std::uint32_t p3p_vfpu_vt(std::uint32_t word) noexcept { return (word >> 16u) & 0x7Fu; }
+
+// Apply a source prefix whose control register was rewritten first --
+// the execute_vfpu_vhdp idiom: swap, apply, restore.
+void p3p_apply_rewritten_prefix(psprecomp::AllegrexContext &ctx, float *values,
+                                std::uint32_t control_index, std::uint32_t rewritten) {
+    const std::uint32_t original = ctx.vfpu_ctrl[control_index];
+    ctx.vfpu_ctrl[control_index] = rewritten;
+    ctx.apply_vfpu_source_prefix(values, 4u, control_index);
+    ctx.vfpu_ctrl[control_index] = original;
+}
+
+// vcrs (VFPU1 sub-op 5): "half a cross product". Hardware rewrites the
+// S swizzle to (y,z,x) and the T swizzle to (z,x,y), then multiplies
+// elementwise, yielding only the positive terms of the cross product
+// (s.y*t.z, s.z*t.x, s.x*t.y); callers supply the negative terms.
+bool p3p_exec_vcrs(psprecomp::AllegrexContext &ctx, std::uint32_t word) {
+    float s[4]{}, t[4]{}, d[4]{};
+    ctx.read_vfpu_vector(s, p3p_vfpu_vs(word), 3u);
+    ctx.read_vfpu_vector(t, p3p_vfpu_vt(word), 3u);
+    p3p_apply_rewritten_prefix(ctx, s, 0u, (ctx.vfpu_ctrl[0] & ~0x3Fu) | 0x09u);
+    p3p_apply_rewritten_prefix(ctx, t, 1u, (ctx.vfpu_ctrl[1] & ~0x3Fu) | 0x12u);
+    for (int i = 0; i < 4; ++i) d[i] = s[i] * t[i];
+    ctx.write_vfpu_vector_with_destination_prefix(d, p3p_vfpu_vd(word), 3u);
+    return true;
+}
+
+// vdet (VFPU1 sub-op 6): determinant of two pairs,
+// d = s.x * t.y - s.y * t.x, computed PPSSPP-style: sources read as
+// pairs, prefixes applied through a four-lane view, the T swizzle
+// forced to (y,x), s.y negated, then a four-lane dot product.
+bool p3p_exec_vdet(psprecomp::AllegrexContext &ctx, std::uint32_t word) {
+    float s[4]{}, t[4]{};
+    ctx.read_vfpu_vector(s, p3p_vfpu_vs(word), 2u);
+    ctx.read_vfpu_vector(t, p3p_vfpu_vt(word), 2u);
+    ctx.apply_vfpu_source_prefix(s, 4u, 0u);
+    p3p_apply_rewritten_prefix(ctx, t, 1u, (ctx.vfpu_ctrl[1] & ~0x0Fu) | 0x01u);
+    s[1] = -s[1];
+    float d[1]{s[0] * t[0] + s[1] * t[1] + s[2] * t[2] + s[3] * t[3]};
+    ctx.write_vfpu_vector_with_destination_prefix(d, p3p_vfpu_vd(word), 1u);
+    return true;
+}
+
+// vi2uc/vi2c/vi2us/vi2s (VFPU7 sub-table 28-31): pack the source
+// lanes (their raw float bit patterns, after the S prefix) into
+// bytes or halves. Mirrors PPSSPP Int_Vi2x.
+bool p3p_exec_vi2x(psprecomp::AllegrexContext &ctx, std::uint32_t word) {
+    const std::uint32_t length = p3p_vfpu_length(word);
+    float sf[4]{};
+    ctx.read_vfpu_vector(sf, p3p_vfpu_vs(word), length);
+    ctx.apply_vfpu_source_prefix(sf, 4u, 0u);
+    std::uint32_t s[4]{};
+    for (int i = 0; i < 4; ++i) s[i] = std::bit_cast<std::uint32_t>(sf[i]);
+    std::uint32_t bits[4]{};
+    std::uint32_t out_length = 1u;
+    switch ((word >> 16u) & 3u) {
+        case 0u: {  // vi2uc: byte = clamp-to-zero(bits) >> 23
+            std::uint32_t packed = 0u;
+            for (std::uint32_t i = 0u; i < 4u; ++i) {
+                std::int32_t v = std::bit_cast<std::int32_t>(s[i]);
+                if (v < 0) v = 0;
+                v >>= 23;
+                packed |= (static_cast<std::uint32_t>(v) & 0xFFu) << (i * 8u);
+            }
+            bits[0] = packed;
+            break;
+        }
+        case 1u: {  // vi2c: byte = bits >> 24
+            std::uint32_t packed = 0u;
+            for (std::uint32_t i = 0u; i < 4u; ++i)
+                packed |= (s[i] >> 24u) << (i * 8u);
+            bits[0] = packed;
+            break;
+        }
+        case 2u:    // vi2us: halves = clamp-to-zero(bits) >> 15
+        case 3u: {  // vi2s:  halves = bits >> 16
+            const bool clamp_shift15 = ((word >> 16u) & 3u) == 2u;
+            const std::uint32_t elems = (length + 1u) / 2u;
+            for (std::uint32_t i = 0u; i < elems; ++i) {
+                std::uint32_t lo = s[i * 2u], hi = s[i * 2u + 1u];
+                if (clamp_shift15) {
+                    std::int32_t ilo = std::bit_cast<std::int32_t>(lo);
+                    std::int32_t ihi = std::bit_cast<std::int32_t>(hi);
+                    if (ilo < 0) ilo = 0;
+                    if (ihi < 0) ihi = 0;
+                    lo = static_cast<std::uint32_t>(ilo >> 15);
+                    hi = static_cast<std::uint32_t>(ihi >> 15);
+                } else {
+                    lo >>= 16u;
+                    hi >>= 16u;
+                }
+                bits[i] = (lo & 0xFFFFu) | ((hi & 0xFFFFu) << 16u);
+            }
+            out_length = elems;
+            break;
+        }
+    }
+    float result[4]{};
+    for (std::uint32_t i = 0u; i < out_length; ++i)
+        result[i] = std::bit_cast<float>(bits[i]);
+    ctx.write_vfpu_vector_with_destination_prefix(result, p3p_vfpu_vd(word), out_length);
+    return true;
+}
+
+// Execute one of the bridge-implemented VFPU instructions; returns
+// false when the trapping word is not one of them.
+bool p3p_vfpu_execute(psprecomp::AllegrexContext &ctx, std::uint32_t word) {
+    switch (word >> 26u) {
+        case 0x19u: {  // VFPU1 group
+            const std::uint32_t sub = (word >> 23u) & 7u;
+            if (sub == 5u) return p3p_exec_vcrs(ctx, word);
+            if (sub == 6u) return p3p_exec_vdet(ctx, word);
+            return false;
+        }
+        case 0x34u: {  // VFPU4 jump table -> VFPU7 sub-table
+            if (((word >> 21u) & 0x1Fu) != 1u) return false;
+            const std::uint32_t sub = (word >> 16u) & 0x1Fu;
+            if (sub >= 28u && sub <= 31u) return p3p_exec_vi2x(ctx, word);
+            return false;
+        }
+        default:
+            return false;
+    }
+}
 
 // Exact-PC stand-in for a trap address: interpret guest code from
 // here until the interpreter hands control back to registered code
@@ -124,12 +265,24 @@ std::unordered_map<std::uint32_t, std::uint32_t> g_bridge_skips;
 // is enough -- the outer dispatcher re-enters the fallback itself for
 // any still-unregistered pc.
 void p3p_interpret_bridge(psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-    // TEMP PROBE (Gate 6): neither the code generator nor the
-    // interpreter implements this instruction (the trap that landed
-    // here). Skip it -- its result register keeps a stale value -- and
-    // interpret onward, purely to map how far the boot advances and
-    // which trap sites are actually load-bearing. NOT a semantic fix;
-    // the sites this probe proves reachable get real implementations.
+    // Real implementations first: if the trapping instruction is one
+    // of the VFPU ops implemented above, execute it on the context
+    // and interpret onward from the next instruction.
+    const std::uint32_t word = rt.memory().load32(ctx.pc);
+    if (p3p_vfpu_execute(ctx, word)) {
+        const std::uint32_t count = ++g_bridge_execs[ctx.pc];
+        if (count == 1u)
+            std::fprintf(stderr, "[p3p] bridge: executed VFPU %s at %s\n",
+                         psprecomp::hex32(word).c_str(), psprecomp::hex32(ctx.pc).c_str());
+        ctx.pc += 4u;
+        psprecomp::interpret_allegrex(rt, ctx, 0u);
+        return;
+    }
+    // TEMP PROBE (Gate 6): the trapping instruction is not one of the
+    // implemented ones. Skip it -- its result register keeps a stale
+    // value -- and interpret onward, purely to map how far the boot
+    // advances and which trap sites are actually load-bearing. NOT a
+    // semantic fix; reachable sites get real implementations.
     const std::uint32_t count = ++g_bridge_skips[ctx.pc];
     if (count == 1u)
         std::fprintf(stderr, "[p3p] probe: skipping unimplemented instruction at %s\n",

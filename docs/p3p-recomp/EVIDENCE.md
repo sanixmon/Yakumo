@@ -607,3 +607,67 @@ and the frame dump reports VRAM nonzero-word counts + raster totals
   stub returning 0 where an object is expected, or fallout from the
   skipped VFPU results. Then: real implementations of the three
   skipped instructions.
+
+
+---
+
+## Gate 6 WP2c — Real VFPU Implementations + Crash Root Cause (2026-10-23)
+
+### The three "VFPU" traps identified and implemented
+
+Decoded against PPSSPP's instruction tables (Core/MIPS/MIPSTables.cpp):
+
+| Word | Site | Instruction |
+|---|---|---|
+| 0x66818102 | 0x08B5737C | **vcrs.t** (VFPU1 sub-op 5) |
+| 0x66808003 | 0x08B57380 | **vcrs.t** (VFPU1 sub-op 5) |
+| 0xD03C8080 | 0x08B57528 | **vi2uc** (VFPU4 jump -> VFPU7 sub-table 28) |
+
+The bridge (profiles/p3p/host/p3p_profile.cpp) now EXECUTES these
+on the AllegrexContext instead of skipping them, using the
+framework's own prefix machinery and PPSSPP's interpreter semantics
+(Core/MIPS/InterpreterVFPU.cpp):
+
+- **vcrs** is a "half cross product": hardware rewrites the S
+  swizzle to (y,z,x) and the T swizzle to (z,x,y) -- via the same
+  save/rewrite/restore idiom as the context's execute_vfpu_vhdp --
+  then multiplies elementwise, producing only the positive cross
+  terms (s.y*t.z, s.z*t.x, s.x*t.y).
+- **vdet** (VFPU1 sub-op 6, implemented alongside): pair sources,
+  prefixes applied through a four-lane view, T swizzle forced to
+  (y,x), s.y negated, four-lane dot => s.x*t.y - s.y*t.x.
+- **vi2uc + siblings vi2c/vi2us/vi2s** (VFPU7 sub-table 28-31):
+  bit-exact ports of PPSSPP Int_Vi2x (pack the S-prefixed source
+  lanes' raw bit patterns; vi2uc byte = clamp-to-zero(bits) >> 23,
+  vi2c = bits >> 24, vi2us halves = clamp0 >> 15, vi2s = >> 16).
+
+Boot log now shows "bridge: executed VFPU ..." for all three sites;
+no probe skip fires anywhere on the boot path. Rendering output is
+unchanged (full VRAM frames, ~41.6M pixels per 40M-dispatch run) and
+the full test suite + verify_boot stay green.
+
+### The 0x14 crash: mechanism proven, allocation hunt is next
+
+Re-running with real VFPU semantics produced the crash
+**byte-identical** (unit 0173, dispatch 0x08AB8B60, a0=0,
+a1=0x08BA888C, ra=0x08AB9004) -- it is NOT fallout from the VFPU
+work. Reading the generated code pins the mechanism:
+
+- sub_08AB8B10 walks a big context struct (s8 = 0x08D6424C at crash
+  time), loading sub-object pointers from fields +308/+324/+328/
+  +340 and calling each sub-object's init function.
+- For field +328 the pointer is **NULL**. It is passed to
+  0x08B1E1A4 (unit 0198), an initializer that zeroes [obj+20],
+  [obj+12], [obj+16] -- the store to [0+20] faults at guest address
+  0x00000014.
+- Context clue: a1 points into a string table containing "PLAY AFS"
+  / "STOP AFS" -- this is CRI AFS territory, and the initializer
+  also touches the CRI global work area (0x08E00000 + 21812/21816).
+
+So a sub-object that should have been allocated/registered earlier
+in the boot never was. Candidate causes for the next step: an
+allocation path inside PRX module code (Gate 5D loads PRXs but does
+not execute their code), or an HLE-mediated registration the host
+currently short-circuits. Next step: trace writes to the context
+field (deterministic boot -- the field address is stable across
+runs) and audit the AFS init path against the PPSSPP trace.
