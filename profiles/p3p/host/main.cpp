@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <string>
 #include "hle/p3p_hle_gedisplay.hpp"
+#include "psprecomp/interpreter.hpp"
 
 #ifdef P3P_HAS_GENERATED
 namespace psprecomp {
@@ -114,6 +115,17 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "[p3p] kernel: %zu threads, current uid %d\n",
                      kernel.thread_count(), kernel.current_uid());
         kernel.dump_thread_states(stderr);
+        {
+            const auto istats = psprecomp::interpreter_stats();
+            std::fprintf(stderr, "[p3p] interpreter: %llu instructions, %llu entries\n",
+                         static_cast<unsigned long long>(istats.instructions),
+                         static_cast<unsigned long long>(istats.entries));
+            const auto profile = psprecomp::interpreter_entry_profile();
+            for (std::size_t i = 0; i < profile.size() && i < 5u; ++i)
+                std::fprintf(stderr, "[p3p]   interp entry %s x%llu\n",
+                             psprecomp::hex32(profile[i].first).c_str(),
+                             static_cast<unsigned long long>(profile[i].second));
+        }
         std::fprintf(stderr, "[p3p] live cpu: pc %s a0 %s a1 %s a2 %s a3 %s sp %s\n",
                      psprecomp::hex32(runtime.cpu().pc).c_str(),
                      psprecomp::hex32(runtime.cpu().gpr[4]).c_str(),

@@ -82,6 +82,18 @@ void gedisplay_reset_state() { g_state = GeDisplayState{}; }
 void gedisplay_set_frame_dump_path(const std::string &path) { g_state.dump_path = path; }
 
 bool gedisplay_dump_frame(psprecomp::GuestMemory &memory, const std::string &path) {
+    {
+        std::uint32_t nz_a = 0, nz_b = 0;
+        for (std::uint32_t a = 0x04000000u; a < 0x04088000u; a += 4u)
+            if (memory.load32(a) != 0u) ++nz_a;
+        for (std::uint32_t a = 0x04088000u; a < 0x04110000u; a += 4u)
+            if (memory.load32(a) != 0u) ++nz_b;
+        std::fprintf(stderr,
+                     "[p3p-ge] dump: display fb %08X, VRAM nonzero words A %u B %u, raster "
+                     "sprites %u tris %u px %u\n",
+                     g_state.fb_topaddr, nz_a, nz_b, g_state.raster_stats.sprites,
+                     g_state.raster_stats.triangles, g_state.raster_stats.pixels_written);
+    }
     const std::uint32_t height = g_state.height != 0 ? g_state.height : 272u;
     const std::uint32_t width =
         std::min(g_state.fb_bufferwidth, g_state.width != 0 ? g_state.width : 480u);
@@ -127,10 +139,16 @@ void ge_run_list(psprecomp::GuestMemory &memory, P3PKernel *kernel, std::uint32_
     ge_accumulate(rec.stats, stats);
     rec.status = res.status;
     rec.pc = res.pc;
-    // Gate 6 WP2: rasterize whatever this run produced.
+    // Gate 6 WP2: rasterize whatever this run produced. Draw records
+    // carry guest-controlled addresses; a wild one must not kill the
+    // host -- log it and skip the rest of this list instead.
     const std::uint32_t pixels_before = g_state.raster_stats.pixels_written;
-    ge::rasterize_draws(memory, rec.draws, rec.rasterized, g_state.fb_pixelformat,
-                        g_state.height, g_state.raster_stats);
+    try {
+        ge::rasterize_draws(memory, rec.draws, rec.rasterized, g_state.fb_pixelformat,
+                            g_state.height, g_state.raster_stats);
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "[p3p-ge] rasterize aborted (list %u): %s\n", id, e.what());
+    }
     rec.rasterized = rec.draws.size();
     const std::uint32_t pixels_new = g_state.raster_stats.pixels_written - pixels_before;
     if (pixels_new > 0u && g_state.ge_log_budget > 0u)

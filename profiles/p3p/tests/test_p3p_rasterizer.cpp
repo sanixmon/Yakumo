@@ -80,12 +80,12 @@ int main() {
     // Case A: untextured red sprite, 10x5 px at (0,0).
     {
         vert_color_pos(mem, kVerts, kRed, 0, 0);
-        vert_color_pos(mem, kVerts + 10, kRed, 160, 80);
+        vert_color_pos(mem, kVerts + 12, kRed, 10, 5);
         GeDrawCall d = base_draw();
         d.prim_type = kPrimSprites;
         d.vertex_count = 2;
         d.vertex_address = kVerts;
-        d.vertex_type = (4u << 2) | (2u << 7) | (1u << 23);  // color 8888, pos s16, through
+        d.vertex_type = (7u << 2) | (2u << 7) | (1u << 23);  // color 8888, pos s16, through
         rasterize_draws(mem, {d}, 0, 3, 272, stats);
         check(fb_pixel(mem, 0, 0) == kRed, "sprite fills its top-left");
         check(fb_pixel(mem, 9, 4) == kRed, "sprite fills its bottom-right");
@@ -105,19 +105,19 @@ int main() {
             put32(mem, kClut + static_cast<std::uint32_t>(i) * 4u, rgba);
         }
         vert_uv_color_pos(mem, kVerts, 0, 0, 0xFFFFFFFFu, 0, 0);
-        vert_uv_color_pos(mem, kVerts + 14, 128, 128, 0xFFFFFFFFu, 64, 64);
+        vert_uv_color_pos(mem, kVerts + 16, 128, 128, 0xFFFFFFFFu, 4, 4);
         GeDrawCall d = base_draw();
         d.prim_type = kPrimSprites;
         d.vertex_count = 2;
         d.vertex_address = kVerts;
-        d.vertex_type = 2u | (4u << 2) | (2u << 7) | (1u << 23);  // tc u16 + color + pos
+        d.vertex_type = 2u | (7u << 2) | (2u << 7) | (1u << 23);  // tc u16 + color + pos
         d.regs[0x1E] = 1;                       // texture map enable
         d.regs[0xA0] = kTex & 0xFFFFFFu;        // tex addr low
         d.regs[0xA8] = ((kTex >> 8) & 0xFF0000u) | 4u;  // tex bufwidth 4 + addr high
         d.regs[0xB8] = 2u | (2u << 8);          // tex size 4x4
         d.regs[0xC3] = 5;                       // CLUT8
         d.regs[0xB0] = kClut & 0xFFFFFFu;       // clut addr low
-        d.regs[0xB1] = (kClut >> 24) & 0xFFu;   // clut addr high
+        d.regs[0xB1] = ((kClut >> 24) & 0xFFu) << 16;   // clut addr high (bits 16-23)
         d.regs[0xC5] = 3u | (0xFFu << 8);       // clut format 8888, mask 0xFF
         rasterize_draws(mem, {d}, 0, 3, 272, stats);
         const std::uint32_t expect00 = (0u) | (255u << 8) | (128u << 16) | (255u << 24);
@@ -152,13 +152,13 @@ int main() {
     // Case D: untextured triangle (0,0),(10,0),(0,10) screen px.
     {
         vert_color_pos(mem, kVerts, kBlue, 0, 0);
-        vert_color_pos(mem, kVerts + 10, kBlue, 160, 0);
-        vert_color_pos(mem, kVerts + 20, kBlue, 0, 160);
+        vert_color_pos(mem, kVerts + 12, kBlue, 10, 0);
+        vert_color_pos(mem, kVerts + 24, kBlue, 0, 10);
         GeDrawCall d = base_draw();
         d.prim_type = kPrimTriangles;
         d.vertex_count = 3;
         d.vertex_address = kVerts;
-        d.vertex_type = (4u << 2) | (2u << 7) | (1u << 23);
+        d.vertex_type = (7u << 2) | (2u << 7) | (1u << 23);
         rasterize_draws(mem, {d}, 0, 3, 272, stats);
         check(fb_pixel(mem, 1, 1) == kBlue, "triangle interior filled");
         check(fb_pixel(mem, 9, 9) == 0u, "triangle exterior untouched");
@@ -168,23 +168,23 @@ int main() {
     // Case E: alpha blend — 50% white over a fresh opaque red sprite.
     {
         vert_color_pos(mem, kVerts, kRed, 0, 0);
-        vert_color_pos(mem, kVerts + 10, kRed, 160, 80);
+        vert_color_pos(mem, kVerts + 12, kRed, 10, 5);
         GeDrawCall base = base_draw();
         base.prim_type = kPrimSprites;
         base.vertex_count = 2;
         base.vertex_address = kVerts;
-        base.vertex_type = (4u << 2) | (2u << 7) | (1u << 23);
+        base.vertex_type = (7u << 2) | (2u << 7) | (1u << 23);
         rasterize_draws(mem, {base}, 0, 3, 272, stats);
         const std::uint32_t white50 = 0x80FFFFFFu;
         vert_color_pos(mem, kVerts, white50, 0, 0);
-        vert_color_pos(mem, kVerts + 10, white50, 160, 80);
+        vert_color_pos(mem, kVerts + 12, white50, 10, 5);
         GeDrawCall d = base_draw();
         d.prim_type = kPrimSprites;
         d.vertex_count = 2;
         d.vertex_address = kVerts;
-        d.vertex_type = (4u << 2) | (2u << 7) | (1u << 23);
+        d.vertex_type = (7u << 2) | (2u << 7) | (1u << 23);
         d.regs[0x21] = 1;                        // alpha blend enable
-        d.regs[0xDF] = (2u << 8) | (3u << 11);   // add, srcAlpha, 1-srcAlpha
+        d.regs[0xDF] = 2u | (3u << 4);          // srcAlpha, 1-srcAlpha, add (eq bits 8-10 = 0)
         rasterize_draws(mem, {d}, 0, 3, 272, stats);
         const std::uint32_t px = fb_pixel(mem, 0, 0);
         const int r = static_cast<int>(px & 0xFFu);
@@ -200,7 +200,7 @@ int main() {
         d.prim_type = kPrimSprites;
         d.vertex_count = 2;
         d.vertex_address = kVerts;
-        d.vertex_type = (4u << 2) | (2u << 7);  // no through bit
+        d.vertex_type = (7u << 2) | (2u << 7);  // no through bit
         const std::uint32_t skipped_before = stats.skipped_non_through;
         rasterize_draws(mem, {d}, 0, 3, 272, stats);
         check(stats.skipped_non_through == skipped_before + 1u,

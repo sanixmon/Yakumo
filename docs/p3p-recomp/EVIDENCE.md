@@ -518,3 +518,92 @@ them execute interpreted (slow, but these are init-path functions)
 and the AOT boot proceeds. Identification: map trap addresses to
 function entries via the analysis function table. Fallback if the
 interpreter also lacks the encodings: lower the specific VFPU ops.
+
+
+---
+
+## Gate 6 WP2b — Interpreter Fallback + Rasterizer Correctness (2026-10-23)
+
+The step that took the boot from "stops at 534ms" to "renders
+continuously". Two halves: getting execution PAST the unlowered
+instructions, and fixing the rasterizer semantics that real display
+lists then exposed.
+
+### Interpreter fallback (profile-side, framework mechanisms only)
+
+- The profile installs `psprecomp::set_runtime_unsupported_hook` and
+  enables the interpreter fallback. On a trap, the hook registers a
+  bridge function (`p3p_interpret_bridge`) at the trap address with a
+  non-"recomp_unit_" name — which POISONS the containing 16 KiB
+  generated unit (the framework's own mechanism, the same one that
+  keeps import-stub buckets dispatchable). Outer dispatch then
+  resolves the trap pc exactly, to the bridge, and the bridge runs
+  `psprecomp::interpret_allegrex` until control reaches registered
+  code again. Everything else in the bucket keeps running AOT via
+  exact dispatch. Earlier dead ends, for the record: hook-alone
+  (dispatch re-enters the unit and re-traps forever), unregistering
+  the block (the unit table ignores the function map).
+- **Neither the code generator nor the interpreter implements the
+  three instructions the boot path needs** (both stop on them):
+  0x66818102 and 0x66808003 (VFPU0-group sub-op 5) at
+  0x08B5737C/0x08B57380, and 0xD03C8080 (VFPU4-group) at
+  0x08B57528 — all inside one init function reached from 0x08B57150.
+  As a labeled PROBE (not a fix), the bridge currently SKIPS those
+  instructions (pc += 4, result register keeps a stale value) and
+  interprets onward. Only those three sites fire on the whole
+  boot-to-render path. Real semantics (candidate: implement in the
+  bridge, profile-side) are the next step.
+- The interpreter is otherwise load-bearing and healthy: stats at
+  exit (instructions/entries + entry profile) are printed by main.
+
+### Rasterizer semantics fixes (all validated against PPSSPP)
+
+The WP2 synthetic tests passed with several wrong conventions
+because the fixture shared them; real lists corrected all of these:
+
+1. **CLUT address high bits**: `(CLUTADDRHIGH & 0xFF0000) << 8`
+   (bits 16-23, like every other GE address register), not the low
+   byte shifted to bit 24.
+2. **GE address aliasing**: GE register addresses for VRAM targets
+   arrive VRAM-relative (fbp as an offset, width-register address
+   bits zero) while GuestMemory maps EDRAM only at 0x04000000.
+   The rasterizer now translates any GE address inside the 2 MiB
+   VRAM span by +0x04000000 (framebuffer, texture, CLUT, transfers).
+3. **Vertex color formats**: the vtype color field is
+   0-3 = none, 4 = 565, 5 = 5551, 6 = 4444, 7 = 8888 (PPSSPP's
+   colsize table {0,0,0,0,2,2,2,4}), not 1-4. Vertex stride aligns
+   to the widest field alignment (color8888 + pos16 = 12 bytes).
+4. **Through positions** are raw screen pixels — no drawing-offset
+   subtraction, no 12.4 scaling (that belongs to the transform
+   path). The fixture had compensated with pre-scaled vertices.
+5. **ALPHATEST layout**: func bits 0-2, ref bits 8-15, mask bits
+   16-23; the comparison runs on masked values. (The game runs
+   GREATER/0/0xFF: alpha-0 texels discarded.)
+6. **BLENDMODE layout + factor numbering**: src factor bits 0-3,
+   dst factor bits 4-7, equation bits 8-10; factors are the
+   GEBlendSrc/DstFactor enums (0 = opposite color, 2 = SRCALPHA,
+   10 = fixed, ...). The game's standard blend is 0x32 =
+   SRCALPHA / INVSRCALPHA / ADD. Fixed the ABSDIFF equation too.
+   The WP2 blend test's register value was rewritten to the
+   hardware encoding (0x32) — it had been built to the wrong layout.
+
+Also: the GE HLE rasterize/execute calls are exception-guarded (a
+wild guest address logs and skips the list, never kills the host),
+and the frame dump reports VRAM nonzero-word counts + raster totals
+— the diagnostic that proved the pipeline end-to-end.
+
+### Boot result
+
+- Display lists flow continuously; both framebuffers are fully
+  written (138,752 nonzero words each in a 512x272 dump window),
+  ~41.6M pixels rasterized in a 40M-dispatch run. The visible frame
+  at this boot phase is a near-black fade frame (opaque black with
+  a soft bottom edge) — the game's actual content at this point.
+- Tests: rasterizer 16/16 (recalibrated fixtures), ge 19, modules
+  20, io 44, services 65, yield 83, threading 128; verify_boot OK.
+- **Next frontier**: after the render phase is established the boot
+  dies on a guest null-struct dereference in unit 0173 at
+  0x08AB8B60 (a0 = 0, a1 = 0x08BA888C, ra = 0x08AB9004) — either a
+  stub returning 0 where an object is expected, or fallout from the
+  skipped VFPU results. Then: real implementations of the three
+  skipped instructions.

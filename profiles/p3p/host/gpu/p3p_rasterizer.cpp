@@ -45,6 +45,15 @@ struct Rgba {
     std::uint8_t r = 0, g = 0, b = 0, a = 255;
 };
 
+// GE-space address -> guest physical address. GE register values
+// for VRAM targets arrive VRAM-relative (the engine passes fbp as an
+// offset and leaves the width register's address bits zero), while
+// GuestMemory maps EDRAM only at 0x04000000. Translate anything
+// inside the 2 MiB VRAM span; RAM addresses pass through.
+constexpr std::uint32_t ge_addr(std::uint32_t address) {
+    return address < 0x200000u ? address + 0x04000000u : address;
+}
+
 Rgba expand565(std::uint16_t v) {
     Rgba c;
     c.r = static_cast<std::uint8_t>(((v & 0x1Fu) << 3) | ((v >> 2) & 7u));
@@ -158,8 +167,8 @@ VertexLayout vertex_layout(std::uint32_t vt) {
         l.tc_off = off;
         off += fmt_size(l.tc_fmt) * 2u;
     }
-    if (l.color_fmt != 0) {
-        const std::uint32_t esz = l.color_fmt == 4 ? 4u : 2u;
+    if (l.color_fmt >= 4) {
+        const std::uint32_t esz = l.color_fmt == 7 ? 4u : 2u;
         off = align_up(off, esz);
         l.color_off = off;
         off += esz;
@@ -171,7 +180,10 @@ VertexLayout vertex_layout(std::uint32_t vt) {
     off = align_up(off, fmt_size(l.pos_fmt));
     l.pos_off = off;
     off += fmt_size(l.pos_fmt) * 3u;
-    l.stride = off;
+    std::uint32_t max_align = fmt_size(l.pos_fmt);
+    if (l.tc_fmt != 0) max_align = std::max(max_align, fmt_size(l.tc_fmt));
+    if (l.color_fmt == 7) max_align = std::max(max_align, 4u);
+    l.stride = align_up(off, max_align);
     l.valid = l.stride > 0;
     return l;
 }
@@ -209,29 +221,21 @@ Vertex decode_vertex(const psprecomp::GuestMemory &m, std::uint32_t base,
             v.v = read_scalar(m, a + fmt_size(l.tc_fmt), l.tc_fmt);
         }
     }
-    if (l.color_fmt != 0) {
+    if (l.color_fmt >= 4) {
         const std::uint32_t a = base + l.color_off;
-        if (l.color_fmt == 4) {
+        if (l.color_fmt == 7) {
             v.color.r = m.load8(a);
             v.color.g = m.load8(a + 1);
             v.color.b = m.load8(a + 2);
             v.color.a = m.load8(a + 3);
         } else {
-            // GE vertex color formats: 1=565, 2=5551, 3=4444.
-            v.color = decode_pixel(rd16(m, a), static_cast<std::uint32_t>(l.color_fmt - 1));
+            // GE vertex color: 4=565, 5=5551, 6=4444 -> pixel formats 0,1,2.
+            v.color = decode_pixel(rd16(m, a), static_cast<std::uint32_t>(l.color_fmt - 4));
         }
     }
     const std::uint32_t pa = base + l.pos_off;
-    const float px = read_scalar(m, pa, l.pos_fmt);
-    const float py = read_scalar(m, pa + fmt_size(l.pos_fmt), l.pos_fmt);
-    if (l.through && l.pos_fmt == 2) {
-        // 12.4 fixed positions minus the 12.4 drawing offset (PPSSPP).
-        v.x = (px - static_cast<float>(regs[kCmdOffsetX] & 0xFFFFu)) / 16.0f;
-        v.y = (py - static_cast<float>(regs[kCmdOffsetY] & 0xFFFFu)) / 16.0f;
-    } else {
-        v.x = px;
-        v.y = py;
-    }
+    v.x = read_scalar(m, pa, l.pos_fmt);
+    v.y = read_scalar(m, pa + fmt_size(l.pos_fmt), l.pos_fmt);
     return v;
 }
 
@@ -264,7 +268,7 @@ Texture texture_from_state(const Regs &regs) {
     Texture t;
     const std::uint32_t addr_arg = regs[kCmdTexAddr0];
     const std::uint32_t bw_arg = regs[kCmdTexBufWidth0];
-    t.addr = (addr_arg & 0xFFFFFFu) | ((bw_arg & 0xFF0000u) << 8);
+    t.addr = ge_addr((addr_arg & 0xFFFFFFu) | ((bw_arg & 0xFF0000u) << 8));
     t.stride = bw_arg & 0x7FFu;
     const std::uint32_t size_arg = regs[kCmdTexSize0];
     const std::uint32_t wexp = size_arg & 0xFFu;
@@ -277,7 +281,7 @@ Texture texture_from_state(const Regs &regs) {
         t.stride = static_cast<std::uint32_t>(t.width);
     t.format = regs[kCmdTexFormat] & 0xFFu;
     t.swizzled = (regs[kCmdTexMode] & 1u) != 0;
-    t.clut_addr = (regs[kCmdClutAddr] & 0xFFFFFFu) | ((regs[kCmdClutAddrHigh] & 0xFFu) << 24);
+    t.clut_addr = ge_addr((regs[kCmdClutAddr] & 0xFFFFFFu) | ((regs[kCmdClutAddrHigh] & 0xFF0000u) << 8));
     const std::uint32_t cf = regs[kCmdClutFormat];
     t.clut_format = cf & 3u;
     t.clut_shift = (cf >> 2) & 0x1Fu;
@@ -346,26 +350,36 @@ Rgba sample_texture(const psprecomp::GuestMemory &m, const Texture &t, int x, in
 
 // GE blend factor encoding (BLENDMODE bits 8-10 / 11-13).
 std::uint32_t blend_factor(int factor, Rgba src, Rgba dst, std::uint32_t fixed, int channel) {
+    // GE blend factors (PPSSPP GEBlendSrcFactor/GEBlendDstFactor --
+    // the SAME numbering serves both sides; the fixed value comes
+    // from BLENDFIXEDA for the source side, BLENDFIXEDB for the dest).
+    const auto ch = [](Rgba c, int i) -> std::uint32_t {
+        return i == 0 ? c.r : i == 1 ? c.g : i == 2 ? c.b : c.a;
+    };
     const auto fixed_ch = [&](int i) { return (fixed >> (i * 8)) & 0xFFu; };
     switch (factor) {
-        case 0: return 0;
-        case 1: return 255;
-        case 2: return src.a;
-        case 3: return 255u - src.a;
-        case 4: return dst.a;
-        case 5: return 255u - dst.a;
+        case 0: return ch(dst, channel);          // DSTCOLOR / SRCCOLOR
+        case 1: return 255u - ch(dst, channel);   // INVDSTCOLOR / INVSRCCOLOR
+        case 2: return src.a;                     // SRCALPHA
+        case 3: return 255u - src.a;              // INVSRCALPHA
+        case 4: return dst.a;                     // DSTALPHA
+        case 5: return 255u - dst.a;              // INVDSTALPHA
         case 6: return std::min(255u, 2u * src.a);
         case 7: return 255u - std::min(255u, 2u * src.a);
-        case 10: return fixed_ch(channel);
+        case 8: return std::min(255u, 2u * dst.a);
+        case 9: return 255u - std::min(255u, 2u * dst.a);
+        case 10: return fixed_ch(channel);        // FIXA / FIXB
         default: return 255;
     }
 }
 
 Rgba blend_pixel(const Regs &regs, Rgba src, Rgba dst) {
     const std::uint32_t mode = regs[kCmdBlendMode];
-    const int equation = static_cast<int>(mode & 7u);
-    const int sfactor = static_cast<int>((mode >> 8) & 7u);
-    const int dfactor = static_cast<int>((mode >> 11) & 7u);
+    // GE BLENDMODE layout (PPSSPP GPUState): src factor bits 0-3,
+    // dst factor bits 4-7, equation bits 8-10.
+    const int sfactor = static_cast<int>(mode & 0xFu);
+    const int dfactor = static_cast<int>((mode >> 4) & 0xFu);
+    const int equation = static_cast<int>((mode >> 8) & 7u);
     const std::uint32_t fixed_a = regs[kCmdBlendFixedA];
     const std::uint32_t fixed_b = regs[kCmdBlendFixedB];
     Rgba out;
@@ -384,6 +398,7 @@ Rgba blend_pixel(const Regs &regs, Rgba src, Rgba dst) {
             case 2: val = (dc[i] * fd - sc[i] * fs) / 255; break;
             case 3: val = std::min(sc[i], dc[i]); break;
             case 4: val = std::max(sc[i], dc[i]); break;
+            case 5: val = std::abs(sc[i] - dc[i]); break;
             default: break;
         }
         *oc[i] = static_cast<std::uint8_t>(std::clamp(val, 0, 255));
@@ -395,16 +410,20 @@ bool alpha_test_passes(const Regs &regs, std::uint8_t a) {
     if ((regs[kCmdAlphaTestEnable] & 1u) == 0)
         return true;
     const std::uint32_t arg = regs[kCmdAlphaTest];
-    const std::uint32_t ref = arg & 0xFFu;
-    switch (static_cast<int>((arg >> 8) & 7u)) {
+    // GE ALPHATEST layout (PPSSPP GPUState): func bits 0-2, ref bits
+    // 8-15, mask bits 16-23; the comparison runs on masked values.
+    const std::uint32_t mask = (arg >> 16) & 0xFFu;
+    const std::uint32_t lhs = static_cast<std::uint32_t>(a) & mask;
+    const std::uint32_t ref = ((arg >> 8) & 0xFFu) & mask;
+    switch (static_cast<int>(arg & 7u)) {
         case 0: return false;
         case 1: return true;
-        case 2: return a == ref;
-        case 3: return a != ref;
-        case 4: return a < ref;
-        case 5: return a <= ref;
-        case 6: return a > ref;
-        case 7: return a >= ref;
+        case 2: return lhs == ref;
+        case 3: return lhs != ref;
+        case 4: return lhs < ref;
+        case 5: return lhs <= ref;
+        case 6: return lhs > ref;
+        case 7: return lhs >= ref;
         default: return true;
     }
 }
@@ -526,10 +545,10 @@ void draw_triangle(psprecomp::GuestMemory &m, const Target &tg, const GeDrawCall
 
 void do_transfer(psprecomp::GuestMemory &m, const GeDrawCall &draw, RasterStats &stats) {
     const Regs &regs = draw.regs;
-    const std::uint32_t src = (regs[kCmdTransferSrc] & 0xFFFFF0u) |
-                              ((regs[kCmdTransferSrcW] & 0xFF0000u) << 8);
-    const std::uint32_t dst = (regs[kCmdTransferDst] & 0xFFFFF0u) |
-                              ((regs[kCmdTransferDstW] & 0xFF0000u) << 8);
+    const std::uint32_t src = ge_addr((regs[kCmdTransferSrc] & 0xFFFFF0u) |
+                                      ((regs[kCmdTransferSrcW] & 0xFF0000u) << 8));
+    const std::uint32_t dst = ge_addr((regs[kCmdTransferDst] & 0xFFFFF0u) |
+                                      ((regs[kCmdTransferDstW] & 0xFF0000u) << 8));
     std::uint32_t src_stride = regs[kCmdTransferSrcW] & 0x7F8u;
     if (src_stride > 0x400u)
         src_stride = 0;
@@ -568,8 +587,8 @@ void rasterize_draws(psprecomp::GuestMemory &memory, const std::vector<GeDrawCal
             continue;
         }
         Target tg;
-        tg.addr = (draw.regs[kCmdFrameBufPtr] & 0xFFFFFFu) |
-                  ((draw.regs[kCmdFrameBufWidth] & 0xFF0000u) << 8);
+        tg.addr = ge_addr((draw.regs[kCmdFrameBufPtr] & 0xFFFFFFu) |
+                          ((draw.regs[kCmdFrameBufWidth] & 0xFF0000u) << 8));
         const std::uint32_t width_reg = draw.regs[kCmdFrameBufWidth] & 0x7F8u;
         tg.stride = width_reg != 0 ? width_reg : 512u;
         tg.format = fb_pixel_format;

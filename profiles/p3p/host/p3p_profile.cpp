@@ -9,6 +9,9 @@
 #include "hle/p3p_hle_threadman.hpp"
 #include "kernel/p3p_kernel.hpp"
 #include "psprecomp/common.hpp"
+#include "psprecomp/interpreter.hpp"
+
+#include <unordered_map>
 
 #include <cstdio>
 #include <map>
@@ -100,9 +103,65 @@ void thread_exit_function(psprecomp::Runtime &runtime, psprecomp::AllegrexContex
 
 }  // namespace
 
+namespace {
+
+// Unsupported-instruction fallback (Gate 6 WP2 follow-up): a handful
+// of corpus instructions were never lowered by the code generator
+// (VFPU pairs 0x66818102/0x66808003, VFPU4-group words, a break
+// encoding) and sit inside otherwise-AOT functions. The generated code
+// traps them via rt.unsupported(); with this hook installed the
+// runtime resumes dispatch at the trap pc, finds no registered block
+// there, and the interpreter executes from that point until control
+// reaches registered code again -- per-block granularity, everything
+// else stays AOT. The per-pc cap keeps a pathological case loud
+// instead of an infinite trap loop.
+std::unordered_map<std::uint32_t, std::uint32_t> g_trap_counts;
+std::unordered_map<std::uint32_t, std::uint32_t> g_bridge_skips;
+
+// Exact-PC stand-in for a trap address: interpret guest code from
+// here until the interpreter hands control back to registered code
+// (its Dispatch exit), its budget cycles, or the run stops. One call
+// is enough -- the outer dispatcher re-enters the fallback itself for
+// any still-unregistered pc.
+void p3p_interpret_bridge(psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+    // TEMP PROBE (Gate 6): neither the code generator nor the
+    // interpreter implements this instruction (the trap that landed
+    // here). Skip it -- its result register keeps a stale value -- and
+    // interpret onward, purely to map how far the boot advances and
+    // which trap sites are actually load-bearing. NOT a semantic fix;
+    // the sites this probe proves reachable get real implementations.
+    const std::uint32_t count = ++g_bridge_skips[ctx.pc];
+    if (count == 1u)
+        std::fprintf(stderr, "[p3p] probe: skipping unimplemented instruction at %s\n",
+                     psprecomp::hex32(ctx.pc).c_str());
+    ctx.pc += 4u;
+    psprecomp::interpret_allegrex(rt, ctx, 0u);
+}
+
+bool p3p_unsupported_hook(psprecomp::Runtime &rt, psprecomp::AllegrexContext &,
+                          std::uint32_t pc, std::uint32_t instruction) {
+    const std::uint32_t count = ++g_trap_counts[pc];
+    if (count == 1u)
+        std::fprintf(stderr, "[p3p] unsupported %s at %s -> interpreter fallback\n",
+                     psprecomp::hex32(instruction).c_str(), psprecomp::hex32(pc).c_str());
+    // Registering a non-"recomp_unit_" function at the trap address
+    // poisons its 16 KiB generated unit (the same mechanism that keeps
+    // import stubs dispatchable): outer dispatch stops entering the
+    // unit wholesale and resolves this pc exactly -- to the bridge --
+    // while the bucket's other blocks keep running AOT via exact
+    // dispatch. The currently-running AOT function returns right
+    // after this hook, and the dispatcher lands here.
+    rt.register_function(pc, &p3p_interpret_bridge, "p3p-interpret-bridge");
+    return count <= 1000000u;
+}
+
+}  // namespace
+
 void init_profile(psprecomp::Runtime &runtime, const psprecomp::Elf32Image &elf,
                   std::uint32_t load_base, P3PKernel *kernel, bool aot) {
     g_kernel = kernel;
+    psprecomp::set_runtime_unsupported_hook(&p3p_unsupported_hook);
+    psprecomp::set_interpreter_fallback_enabled(true);
     g_import_by_stub.clear();
 
     const auto module = elf.find_module_info(runtime.memory(), load_base);
