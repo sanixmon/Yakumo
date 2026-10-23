@@ -671,3 +671,44 @@ not execute their code), or an HLE-mediated registration the host
 currently short-circuits. Next step: trace writes to the context
 field (deterministic boot -- the field address is stable across
 runs) and audit the AFS init path against the PPSSPP trace.
+
+
+### Crash investigation follow-up (same day)
+
+A temporary watch probe on the four context fields at import
+dispatch boundaries (removed after use) proved the whole sub-object
+table (+308/+324/+328/+340) is **never written at any point in the
+boot** -- the initializer that populates it never runs. Static
+searches exclude the direct explanations: no store with the field's
+absolute address, no data-table reference to the field or the
+context base in the ELF, and the context is a fixed BSS singleton
+(sub_08AB8B10 sets s8 = 0x08D6424C itself).
+
+The boot log reframes the crash: it does not happen during SAS
+bring-up. After SAS thread creation the game proceeds to the
+**opening movie**: it opens
+`disc0:/PSP_GAME/USRDIR/sound/pmsf/P3OPMV_P3P.pmsf`, loads utility
+modules 0x300/0x303 (PsmfPlayer), and calls -- all currently stubbed
+to return 0:
+
+- sceMpegInit 0x682A619B, sceMpegRingbufferQueryMemSize 0xD7A29F46,
+  sceMpegQueryMemSize 0xC132E22F, sceMpegRingbufferConstruct
+  0x37295ED8, sceMpegCreate 0xD8C5F121, sceMpegQueryStreamOffset
+  0x21FF80E4, sceMpegQueryStreamSize 0x611E9E11, sceMpegRegistStream
+  0x42560F23
+- sceKernelCreateSema 0xD6DA4BA1, sceKernelSignalSema 0x3F53E640
+
+sub_08AB8B10 is the game's movie-player state function (its a1
+points at the "PLAY AFS"/"STOP AFS" state-name table); its player
+sub-objects were never created because the multimedia bring-up
+underneath them is hollow. Root-cause class confirmed as the
+long-standing candidate: HLE stubs returning 0 where the game needs
+real sizes/handles/objects.
+
+Next work package (needs its own authorization): minimal honest
+sceMpeg surface per PPSSPP -- QueryMemSize/RingbufferQueryMemSize
+return the real structure sizes, Create/RingbufferConstruct set up
+host-side records, RegistStream returns stream ids, CreateSema
+returns real kernel UIDs (semaphores are also Gate 5B-era debt) --
+then re-run this boot and see whether the player populates its
+table or the game takes a graceful no-movie path.
