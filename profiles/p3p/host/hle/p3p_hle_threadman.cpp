@@ -247,6 +247,68 @@ bool hle_threadman_extra_dispatch(psprecomp::Runtime &runtime, psprecomp::Allegr
         case kNidUnlockMutex:
             set_v0(ctx, kernel.unlock_mutex(a0, static_cast<std::int32_t>(ctx.gpr[5])));
             return true;
+        case kNidCreateSema: {
+            std::string name;
+            if (!read_guest_string(memory, ctx.gpr[4], 32u, name)) {
+                set_v0(ctx, static_cast<std::int32_t>(kErrorIllegalAddr));
+                return true;
+            }
+            const std::int32_t uid = kernel.create_semaphore(
+                name, ctx.gpr[5], static_cast<std::int32_t>(ctx.gpr[6]),
+                static_cast<std::int32_t>(ctx.gpr[7]));
+            if (uid > 0)
+                std::fprintf(stderr, "[p3p] create sema '%s' attr %s init %d max %d -> uid %d\n",
+                             name.c_str(), psprecomp::hex32(ctx.gpr[5]).c_str(),
+                             static_cast<std::int32_t>(ctx.gpr[6]),
+                             static_cast<std::int32_t>(ctx.gpr[7]), uid);
+            set_v0(ctx, uid);
+            return true;
+        }
+        case kNidDeleteSema:
+            set_v0(ctx, kernel.delete_semaphore(a0));
+            return true;
+        case kNidWaitSema:
+        case kNidWaitSemaCB: {
+            const std::int32_t count = static_cast<std::int32_t>(ctx.gpr[5]);
+            const std::uint32_t timeout_addr = ctx.gpr[6];
+            std::int32_t error = 0;
+            const P3PKernel::SemaWaitResult result = kernel.wait_semaphore(a0, count, error);
+            if (result == P3PKernel::SemaWaitResult::Acquired) {
+                set_v0(ctx, 0);
+                return true;
+            }
+            if (result == P3PKernel::SemaWaitResult::Error) {
+                set_v0(ctx, error);
+                return true;
+            }
+            // Would block. A zero timeout makes the call a poll.
+            if (timeout_addr != 0u && memory.contains(timeout_addr, 4u) &&
+                memory.load32(timeout_addr) == 0u) {
+                set_v0(ctx, static_cast<std::int32_t>(kErrorWaitTimeout));
+                return true;
+            }
+            // Block for real: a signal that satisfies the wait deducts
+            // the count and readies the thread; the re-dispatched wait
+            // completes through the kernel's hand-off branch.
+            kernel.note_wait_semaphore(a0, count);
+            if (kernel.block_current(ctx))
+                return true;
+            kernel.clear_wait();
+            static std::set<std::int32_t> sema_logged;
+            if (sema_logged.emplace(a0).second)
+                std::fprintf(stderr,
+                             "[p3p] wait sema uid %d would block with no thread "
+                             "to run; returning success (headless)\n",
+                             a0);
+            set_v0(ctx, 0);
+            return true;
+        }
+        case kNidSignalSema:
+            set_v0(ctx, kernel.signal_semaphore(a0, static_cast<std::int32_t>(ctx.gpr[5])));
+            return true;
+        case kNidPollSema:
+            set_v0(ctx, kernel.poll_semaphore(a0, static_cast<std::int32_t>(ctx.gpr[5])));
+            return true;
         case kNidGetThreadCurrentPriority:
             set_v0(ctx, kernel.thread_priority(0));
             return true;

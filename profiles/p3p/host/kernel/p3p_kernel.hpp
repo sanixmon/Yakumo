@@ -43,6 +43,8 @@ inline constexpr std::uint32_t kMutexErrorNotLocked = 0x800201C5u;    // SCE_MUT
 inline constexpr std::uint32_t kMutexErrorLockOverflow = 0x800201C6u; // SCE_MUTEX_ERROR_LOCK_OVERFLOW
 inline constexpr std::uint32_t kMutexErrorUnlockUnderflow = 0x800201C7u;  // SCE_MUTEX_ERROR_UNLOCK_UNDERFLOW
 inline constexpr std::uint32_t kMutexErrorAlreadyLocked = 0x800201C8u;     // SCE_MUTEX_ERROR_ALREADY_LOCKED
+inline constexpr std::uint32_t kErrorSemaZero = 0x800201ADu;        // SCE_KERNEL_ERROR_SEMA_ZERO
+inline constexpr std::uint32_t kErrorSemaOvf = 0x800201AEu;         // SCE_KERNEL_ERROR_SEMA_OVF
 inline constexpr std::uint32_t kErrorNotFoundUidFunc = 0x800200CEu;  // SCE_KERNEL_ERROR_NOT_FOUND_UIDFUNC
 
 // RangeAllocator allocation types (mirrors sceKernelAllocPartitionMemory).
@@ -129,7 +131,7 @@ struct P3PThread {
     // the wait so the kernel can re-evaluate satisfaction when bits change;
     // the blocked call itself stays pointed at its import stub in the saved
     // context and is re-dispatched when the thread is scheduled again.
-    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3, ThreadSleep = 4 };
+    enum class WaitKind : std::uint32_t { None = 0, EventFlag = 1, Sleep = 2, Mutex = 3, ThreadSleep = 4, Semaphore = 5 };
     WaitKind wait_kind = WaitKind::None;
     std::int32_t wait_evf_uid = 0;
     std::uint32_t wait_pattern = 0;
@@ -141,6 +143,13 @@ struct P3PThread {
     // was blocked in LockMutex: its re-dispatched lock call completes
     // through lock_mutex's hand-off branch instead of acquiring again.
     std::int32_t mutex_handed_uid = 0;
+    std::int32_t wait_sema_uid = 0;
+    std::int32_t wait_sema_count = 0;
+    // Set when a signal satisfied this thread's wait while it was
+    // blocked: the count was already deducted at signal time, and the
+    // re-dispatched wait completes through wait_semaphore's hand-off
+    // branch instead of deducting again.
+    std::int32_t sema_handed_uid = 0;
     // Gate 5C timed waits (DelayThread, vblank pacing, audio drain): while
     // timed_wait is set, a Waiting thread becomes Ready again once the
     // kernel's fake clock reaches wake_at_us.
@@ -243,6 +252,24 @@ public:
     std::int32_t unlock_mutex(std::int32_t uid, std::int32_t count);
     void note_wait_mutex(std::int32_t mutex_uid, std::int32_t count);
     [[nodiscard]] std::size_t mutex_count() const noexcept { return mutexes_.size(); }
+
+    // Semaphores (sceKernelCreateSema family), modelled on PPSSPP
+    // sceKernelSemaphore.cpp: a count between 0 and a maximum; a wait
+    // deducts its wanted count when satisfied. Blocked waits record
+    // WaitKind::Semaphore; a signal deducts for each waiter it wakes
+    // (in waiter order, priority order under attr 0x100) and hands the
+    // acquisition to the woken thread, whose re-dispatched wait then
+    // completes through wait_semaphore's hand-off branch. Poll
+    // additionally refuses to deduct while any thread is waiting.
+    enum class SemaWaitResult : std::uint32_t { Acquired = 0, Blocked = 1, Error = 2 };
+    std::int32_t create_semaphore(const std::string &name, std::uint32_t attr,
+                                  std::int32_t initial_count, std::int32_t max_count);
+    std::int32_t delete_semaphore(std::int32_t uid);
+    SemaWaitResult wait_semaphore(std::int32_t uid, std::int32_t count, std::int32_t &error);
+    std::int32_t poll_semaphore(std::int32_t uid, std::int32_t count);
+    std::int32_t signal_semaphore(std::int32_t uid, std::int32_t count);
+    void note_wait_semaphore(std::int32_t sema_uid, std::int32_t count);
+    [[nodiscard]] std::size_t semaphore_count() const noexcept { return semaphores_.size(); }
 
     [[nodiscard]] const P3PThread *find_thread(std::int32_t uid) const;
     [[nodiscard]] std::int32_t current_uid() const noexcept { return current_uid_; }
@@ -370,6 +397,14 @@ private:
     std::map<std::int32_t, Callback> callbacks_;
     std::map<std::int32_t, EventFlag> event_flags_;
     std::map<std::int32_t, Mutex> mutexes_;
+    struct Semaphore {
+        std::string name;
+        std::uint32_t attr = 0;
+        std::int32_t count = 0;
+        std::int32_t max_count = 0;
+        std::vector<std::int32_t> waiters;  // FIFO
+    };
+    std::map<std::int32_t, Semaphore> semaphores_;
     std::map<std::int32_t, ModuleRecord> modules_;
     std::int32_t main_module_uid_ = 0;
     std::uint32_t main_module_base_ = 0;

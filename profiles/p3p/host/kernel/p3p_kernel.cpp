@@ -640,6 +640,149 @@ std::int32_t P3PKernel::unlock_mutex(std::int32_t uid, std::int32_t count) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Semaphores
+
+std::int32_t P3PKernel::create_semaphore(const std::string &name, std::uint32_t attr,
+                                         std::int32_t initial_count, std::int32_t max_count) {
+    // The reference validates only the attribute range at create; the
+    // counts are stored as given.
+    if (attr >= 0x200u)
+        return static_cast<std::int32_t>(kErrorIllegalAttr);
+    const std::int32_t uid = next_uid_++;
+    Semaphore sema;
+    sema.name = name;
+    sema.attr = attr;
+    sema.count = initial_count;
+    sema.max_count = max_count;
+    semaphores_.emplace(uid, std::move(sema));
+    return uid;
+}
+
+std::int32_t P3PKernel::delete_semaphore(std::int32_t uid) {
+    const auto it = semaphores_.find(uid);
+    if (it == semaphores_.end())
+        return static_cast<std::int32_t>(kErrorUnknownObject);
+    // Wake every waiter; its re-dispatched wait observes the deletion
+    // as an unknown UID (same trade-off as delete_mutex).
+    for (const std::int32_t waiter_uid : it->second.waiters) {
+        const auto wit = threads_.find(waiter_uid);
+        if (wit != threads_.end() && wit->second.status == ThreadStatus::Waiting &&
+            wit->second.wait_kind == P3PThread::WaitKind::Semaphore) {
+            wit->second.status = ThreadStatus::Ready;
+            wit->second.wait_kind = P3PThread::WaitKind::None;
+            wit->second.wait_sema_uid = 0;
+            wit->second.wait_sema_count = 0;
+        }
+    }
+    semaphores_.erase(it);
+    return 0;
+}
+
+P3PKernel::SemaWaitResult P3PKernel::wait_semaphore(std::int32_t uid, std::int32_t count,
+                                                    std::int32_t &error) {
+    error = 0;
+    const auto it = semaphores_.find(uid);
+    if (it == semaphores_.end()) {
+        error = static_cast<std::int32_t>(kErrorUnknownObject);
+        return SemaWaitResult::Error;
+    }
+    Semaphore &sema = it->second;
+    const auto cur = threads_.find(current_uid_);
+    // Resume after a signal hand-off: the count was already deducted.
+    if (cur != threads_.end() && cur->second.sema_handed_uid == uid) {
+        cur->second.sema_handed_uid = 0;
+        cur->second.wait_kind = P3PThread::WaitKind::None;
+        cur->second.wait_sema_uid = 0;
+        cur->second.wait_sema_count = 0;
+        return SemaWaitResult::Acquired;
+    }
+    if (count <= 0) {
+        error = static_cast<std::int32_t>(kErrorIllegalCount);
+        return SemaWaitResult::Error;
+    }
+    if (sema.count >= count) {
+        sema.count -= count;
+        return SemaWaitResult::Acquired;
+    }
+    return SemaWaitResult::Blocked;
+}
+
+std::int32_t P3PKernel::poll_semaphore(std::int32_t uid, std::int32_t count) {
+    const auto it = semaphores_.find(uid);
+    if (it == semaphores_.end())
+        return static_cast<std::int32_t>(kErrorUnknownObject);
+    if (count <= 0)
+        return static_cast<std::int32_t>(kErrorIllegalCount);
+    Semaphore &sema = it->second;
+    // The reference refuses to let a poll jump the queue: while any
+    // thread is waiting, even a satisfiable poll fails.
+    if (sema.count >= count && sema.waiters.empty()) {
+        sema.count -= count;
+        return 0;
+    }
+    return static_cast<std::int32_t>(kErrorSemaZero);
+}
+
+std::int32_t P3PKernel::signal_semaphore(std::int32_t uid, std::int32_t count) {
+    const auto it = semaphores_.find(uid);
+    if (it == semaphores_.end())
+        return static_cast<std::int32_t>(kErrorUnknownObject);
+    Semaphore &sema = it->second;
+    // Overflow is judged against the post-wake remainder, per the
+    // reference: current + signal - waiter count must stay <= max,
+    // and an overflowing signal changes nothing.
+    if (static_cast<std::int64_t>(sema.count) + count -
+            static_cast<std::int64_t>(sema.waiters.size()) >
+        static_cast<std::int64_t>(sema.max_count))
+        return static_cast<std::int32_t>(kErrorSemaOvf);
+    sema.count += count;
+    // Wake satisfiable waiters, best first: waiter order, or priority
+    // order under attr 0x100. Each woken waiter's count is deducted
+    // now and completed via the hand-off at its re-dispatch.
+    for (;;) {
+        std::size_t best = sema.waiters.size();
+        for (std::size_t i = 0; i < sema.waiters.size(); ++i) {
+            const auto wit = threads_.find(sema.waiters[i]);
+            if (wit == threads_.end() || wit->second.wait_sema_count > sema.count)
+                continue;
+            if (best == sema.waiters.size()) {
+                best = i;
+                continue;
+            }
+            if ((sema.attr & 0x100u) != 0u) {
+                const auto best_thread = threads_.find(sema.waiters[best]);
+                if (best_thread != threads_.end() &&
+                    wit->second.priority < best_thread->second.priority)
+                    best = i;
+            }
+        }
+        if (best == sema.waiters.size())
+            break;
+        const std::int32_t waiter_uid = sema.waiters[best];
+        sema.waiters.erase(sema.waiters.begin() + static_cast<std::ptrdiff_t>(best));
+        const auto wit = threads_.find(waiter_uid);
+        if (wit != threads_.end() && wit->second.status == ThreadStatus::Waiting) {
+            sema.count -= wit->second.wait_sema_count;
+            wit->second.sema_handed_uid = uid;
+            wit->second.status = ThreadStatus::Ready;
+        }
+    }
+    return 0;
+}
+
+void P3PKernel::note_wait_semaphore(std::int32_t sema_uid, std::int32_t count) {
+    const auto it = threads_.find(current_uid_);
+    if (it == threads_.end())
+        return;
+    it->second.wait_kind = P3PThread::WaitKind::Semaphore;
+    it->second.wait_sema_uid = sema_uid;
+    it->second.wait_sema_count = count;
+    const auto sit = semaphores_.find(sema_uid);
+    if (sit != semaphores_.end())
+        sit->second.waiters.push_back(current_uid_);
+}
+
 void P3PKernel::note_wait_mutex(std::int32_t mutex_uid, std::int32_t count) {
     const auto it = threads_.find(current_uid_);
     if (it == threads_.end())

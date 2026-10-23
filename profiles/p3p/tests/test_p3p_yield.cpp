@@ -384,6 +384,99 @@ int main() {
               "loader lock completes after the hand-off");
     }
 
+    // --- Semaphores: counts, poll rules, overflow, blocking hand-off ---
+    {
+        psprecomp::Runtime runtime(32u * 1024u * 1024u);
+        P3PKernel kernel;
+        const std::int32_t loader = kernel.bootstrap_loader("loader", 0x08804108u, 0x20, 0u, 0x10000u);
+        const std::int32_t worker = kernel.create_thread("worker", 0x0880C000u, 0x30, 0x10000u, 0u, 0u, runtime.memory());
+        check(kernel.start_thread(worker, 0u, 0u, runtime.memory()) == 0, "sema-test worker started");
+
+        put_str(runtime, kStrAddr, "sem");
+        psprecomp::AllegrexContext mk{};
+        mk.gpr[4] = kStrAddr;  // name
+        mk.gpr[5] = 0u;        // attr
+        mk.gpr[6] = 0u;        // initial count
+        mk.gpr[7] = 5u;        // max count
+        check(hle_threadman_extra_dispatch(runtime, mk, kernel, kNidCreateSema),
+              "create sema handled");
+        const std::int32_t sem = static_cast<std::int32_t>(mk.gpr[2]);
+        check(sem > 0, "sema uid valid");
+
+        // The loader waits for 3: it blocks, the worker runs.
+        psprecomp::AllegrexContext wt{};
+        wt.pc = kFakeStub;
+        wt.gpr[31] = 0x08804444u;
+        wt.gpr[4] = static_cast<std::uint32_t>(sem);
+        wt.gpr[5] = 3u;
+        wt.gpr[6] = 0u;
+        check(hle_threadman_extra_dispatch(runtime, wt, kernel, kNidWaitSema),
+              "loader wait handled");
+        check(kernel.current_uid() == worker, "worker runs while the loader waits on the sema");
+        check(kernel.find_thread(loader)->status == ThreadStatus::Waiting, "loader blocked on sema");
+
+        // Signal 2: not enough for the waiter's 3, nobody wakes. A poll
+        // by the worker still fails -- a poll may not jump the queue.
+        psprecomp::AllegrexContext sg{};
+        sg.gpr[4] = static_cast<std::uint32_t>(sem);
+        sg.gpr[5] = 2u;
+        check(hle_threadman_extra_dispatch(runtime, sg, kernel, kNidSignalSema) && sg.gpr[2] == 0u,
+              "signal 2 accepted");
+        check(kernel.find_thread(loader)->status == ThreadStatus::Waiting,
+              "loader still waiting after a partial signal");
+        psprecomp::AllegrexContext pol{};
+        pol.gpr[4] = static_cast<std::uint32_t>(sem);
+        pol.gpr[5] = 1u;
+        check(hle_threadman_extra_dispatch(runtime, pol, kernel, kNidPollSema) &&
+                  pol.gpr[2] == 0x800201ADu,
+              "poll refuses to jump a waiting queue (SEMA_ZERO)");
+
+        // Signal 1 more: the wait is satisfied, deducted at signal
+        // time, and handed to the loader.
+        sg.gpr[5] = 1u;
+        check(hle_threadman_extra_dispatch(runtime, sg, kernel, kNidSignalSema) && sg.gpr[2] == 0u,
+              "signal 1 completes the wait");
+        check(kernel.find_thread(loader)->status == ThreadStatus::Ready, "loader readied by the signal");
+        check(hle_threadman_extra_dispatch(runtime, pol, kernel, kNidPollSema) &&
+                  pol.gpr[2] == 0x800201ADu,
+              "handed-off counts were already deducted");
+
+        // The worker exits; the loader's re-dispatched wait completes
+        // through the hand-off.
+        check(kernel.exit_current_and_schedule_next(wt), "worker exit hands over to the loader");
+        check(kernel.current_uid() == loader, "loader resumed at its wait call");
+        check(hle_threadman_extra_dispatch(runtime, wt, kernel, kNidWaitSema) && wt.gpr[2] == 0u,
+              "handed-off wait completes on re-dispatch");
+
+        // Overflow: 0 + 6 > max 5 changes nothing; 5 fits exactly.
+        sg.gpr[5] = 6u;
+        check(hle_threadman_extra_dispatch(runtime, sg, kernel, kNidSignalSema) &&
+                  sg.gpr[2] == 0x800201AEu,
+              "overflowing signal is SEMA_OVF");
+        sg.gpr[5] = 5u;
+        check(hle_threadman_extra_dispatch(runtime, sg, kernel, kNidSignalSema) && sg.gpr[2] == 0u,
+              "signal to exactly max accepted");
+        wt.gpr[5] = 5u;
+        check(hle_threadman_extra_dispatch(runtime, wt, kernel, kNidWaitSema) && wt.gpr[2] == 0u,
+              "wait for the full count acquires immediately");
+        check(hle_threadman_extra_dispatch(runtime, pol, kernel, kNidPollSema) &&
+                  pol.gpr[2] == 0x800201ADu,
+              "poll on an empty sema is SEMA_ZERO");
+
+        // Illegal counts and deletion.
+        wt.gpr[5] = 0u;
+        check(hle_threadman_extra_dispatch(runtime, wt, kernel, kNidWaitSema) &&
+                  wt.gpr[2] == 0x800201BDu,
+              "wait with count 0 is ILLEGAL_COUNT");
+        psprecomp::AllegrexContext del{};
+        del.gpr[4] = static_cast<std::uint32_t>(sem);
+        check(hle_threadman_extra_dispatch(runtime, del, kernel, kNidDeleteSema) && del.gpr[2] == 0u,
+              "delete sema");
+        check(hle_threadman_extra_dispatch(runtime, pol, kernel, kNidPollSema) &&
+                  pol.gpr[2] == 0x800200CBu,
+              "poll on a deleted sema is an unknown object");
+    }
+
     std::fprintf(stderr, "test_p3p_yield: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
